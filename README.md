@@ -16,15 +16,27 @@ AWS EKS cluster setup with Envoy proxy as a reverse proxy for WebSocket applicat
     │   ├── vpc.tf             # VPC, subnets, routing
     │   ├── security_groups.tf # Security groups
     │   └── outputs.tf         # Resource outputs
-    └── 03-eks-cluster/        # Section 3: EKS Cluster Details
-        ├── README.md          # EKS section documentation
+    ├── 03-eks-cluster/        # Section 3: EKS Cluster Details
+    │   ├── README.md          # EKS section documentation
+    │   ├── deploy.sh          # Deployment script
+    │   ├── locals.tf          # Configuration variables
+    │   ├── versions.tf        # Terraform and provider versions
+    │   ├── data.tf            # Remote state data sources
+    │   ├── iam.tf             # IAM roles and policies
+    │   ├── eks.tf             # EKS cluster and node group
+    │   └── outputs.tf         # Resource outputs
+    └── 04-ecr-repositories/   # Section 4: Container Registries (ECR)
+        ├── README.md          # ECR section documentation
         ├── deploy.sh          # Deployment script
         ├── locals.tf          # Configuration variables
         ├── versions.tf        # Terraform and provider versions
-        ├── data.tf            # Remote state data sources
-        ├── iam.tf             # IAM roles and policies
-        ├── eks.tf             # EKS cluster and node group
-        └── outputs.tf         # Resource outputs
+        ├── ecr.tf             # ECR repositories and policies
+        ├── null-resources.tf  # Bash script integration
+        ├── outputs.tf         # Resource outputs
+        └── scripts/           # Bash scripts for ECR operations
+            ├── ecr-login.sh   # ECR Docker login
+            ├── ecr-status.sh  # Repository status check
+            └── ecr-cleanup.sh # Image cleanup
 ```
 
 ## Implemented Sections
@@ -68,6 +80,33 @@ kubectl cluster-info
 kubectl get nodes
 ```
 
+### ✅ Section 4: Container Registries (ECR)
+
+Creates Amazon ECR repositories for application containers:
+- Server application repository: `cfndev-envoy-proxy-poc-app`
+- Client application repository: `cfndev-envoy-proxy-poc-client`
+- Lifecycle policies for automatic image cleanup
+- Integrated bash scripts for ECR operations via null resources
+- Image scanning and encryption enabled
+
+**Usage:**
+```bash
+cd terraform/04-ecr-repositories
+./deploy.sh apply
+```
+
+**ECR Operations:**
+```bash
+# Check repository status
+./deploy.sh status
+
+# Login to ECR
+./deploy.sh login
+
+# Get Docker commands
+./deploy.sh commands
+```
+
 ## AWS Configuration
 
 - **AWS Profile**: `avive-cfndev-k8s` (AWS SSO)
@@ -89,6 +128,6 @@ Implement remaining sections:
 The sections have dependencies and should be deployed in this order:
 1. **Section 2**: Networking (foundation)
 2. **Section 3**: EKS Cluster (depends on networking)
-3. **Section 4**: ECR Repositories
+3. **Section 4**: ECR Repositories (independent, can be deployed anytime)
 4. **Sections 5-7**: Applications (depend on EKS and ECR)
 5. **Section 8**: Verification
