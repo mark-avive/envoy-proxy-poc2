@@ -1,0 +1,149 @@
+AWS EKS Cluster Setup Requirements: Envoy Proxy POC
+
+This document outlines the refined requirements for deploying an AWS EKS cluster, named 'envoy-poc'. 
+The setup will include an Envoy proxy as a reverse proxy for a WebSocket application, along with a client application for testing.
+
+---
+
+1. Project Structure and Tooling
+
+   - terraform Project(s):
+     - Requirement: A separate terraform folder for each requirement section in this document.
+     - use reference to backends to share resources across folders.
+     - terraform commands are to be able to be run without any additional arguments.
+     - hardcoded values are to be avoided, use a single locals,tf for all configurable values
+     - any code not directly contibuting to these requirements or needed for terraform functionality must be explicitly approved
+     - Naming Convention: All resources within terraform code must use descriptive names (e.g., 'envoy_poc_eks_cluster', 'envoy_poc_app_ecr_repository', 'envoy_poc_vpc').
+   - External scripts:
+     - Requirement: Utilize base scripts with aws cli for tasks outside terraforms's core infrastructure provisioning (e.g., building and pushing Docker images to ECR).
+   - terraform State Backend:
+     - Requirement: Use a pre-existing S3 backend for state, different prefix for each folder (foldername prefixed to the key).
+     - S3 Bucket Name: 'cfndev-envoy-proxy-poc-terraform-state'
+   - AWS Credentials:
+     - Requirement: terraform will use AWS SSO credentials via the local AWS CLI profile 'avive-cfndev-k8s'.
+
+---
+
+2. AWS Networking (VPC, Subnets, Security Groups)
+
+   - Requirement: terraform will create a new VPC and associated networking components.
+   - VPC Name: 'envoy-vpc'
+   - VPC CIDR: '172.245.0.0/16'
+   - Subnets:
+     - Private Subnets (2): For EKS worker nodes and internal services, in different Availability Zones.
+     - Public Subnets (2): For the AWS ALB and NAT Gateways, in different Availability Zones.
+   - Internet Gateway: For public subnet internet access.
+   - NAT Gateways (2): One in each public subnet for private subnet internet egress.
+   - Route Tables: Configured appropriately for public and private subnets.
+   - Security Groups:
+     - EKS Cluster Security Group: For communication between EKS control plane and worker nodes.
+     - Worker Node Security Group: Allows ingress from EKS cluster SG and egress to AWS services.
+     - ALB Security Group: Allows ingress on HTTP (Port 80) from the internet.
+     - Envoy Service Security Group: Allows ingress from the ALB.
+
+---
+
+3. EKS Cluster Details
+
+   - Cluster Name: 'envoy-poc'
+   - Kubernetes Version: 1.33 (Current stable EKS version for this POC).
+   - Node Group:
+     - Type: Managed EC2 Node Group
+     - Instance Type: 't3.medium'
+     - Desired Capacity: 2 nodes
+     - Min Capacity: 2 nodes
+     - Max Capacity: 4 nodes
+     - AMI Type: 'AL2_x86_64' (Amazon Linux 2)
+   - EKS API Server Endpoints:
+     - Requirement: Both public and private endpoints will be enabled.
+   - Control Plane Logging:
+     - Requirement: Enable 'api', 'audit', 'authenticator', and 'scheduler' logs to CloudWatch Logs.
+
+---
+
+4. Container Registries (ECR)
+
+   - ECR Repository for Server Application:
+     - Name: 'cfndev-envoy-proxy-poc-app'
+     - Requirement: terraform will create this repository.
+   - ECR Repository for Client Application:
+     - Name: 'cfndev-envoy-proxy-poc-client'
+     - Requirement: terraform will create this repository.
+
+---
+
+5. Server Application
+
+   - Description: A minimalist WebSocket application.
+   - Functionality:
+     1. Opens and holds WebSocket connections from clients.
+     2. Waits for a message over the WebSocket pipe.
+     3. Responds with current timestamp and pod's IP address.
+   - Containerization:
+     - Base Image Recommendation: 'python:3.10-alpine'
+     - Requirement: Dockerfile will be created.
+     - Image Build & Push: Separate Python script will build and push to 'cfndev-envoy-proxy-poc-app' ECR.
+   - Deployment:
+     - Requirement: Deploy as a Kubernetes Deployment.
+     - Replicas: 4 pods.
+     - Kubernetes Service: ClusterIP Service ('envoy-poc-app-server-service').
+     - Resource Limits: 'cpu: 100m', 'memory: 128Mi' (initial).
+
+---
+
+6. Envoy Proxy Setup
+
+   - Role: Reverse proxy to manage and rate-limit/max connectin limit WebSocket connections.
+   - Deployment Strategy:
+     - Recommendation: Kubernetes Deployment with 2-3 replicas, exposed via an AWS Load Balancer Controller (ALB) Ingress.
+     - AWS Load Balancer Controller: terraform will deploy this into the EKS cluster.
+     - AWS ALB: Provisioned by ALB Controller.
+       - Listener: Non-SSL (HTTP Port 80) for this POC.
+   - Envoy Configuration (via ConfigMap):
+     - Listeners: On Port 80.
+     - Routes: To 'envoy-poc-app-server-service'.
+     - Clusters: Pointing to 'envoy-poc-app-server-service'.
+     - Health Checks: Active health checks to backend server pods.
+     - Access Logging: To stdout/stderr.
+     - Metrics: Expose statistics endpoint (e.g., Port 9901).
+     - WebSocket Connection Management:
+       - Per-Pod Connection Limiting: Concurrency limits per upstream stream. max 2 WebSocket connections per pod.
+       - New Connection Rate Limiting: Global and/or per-client rate limits. 1/connection per second limit.
+     - Service Discovery: Leverage Kubernetes DNS.
+   - Resource Limits: 'cpu: 250m', 'memory: 256Mi' (initial).
+
+---
+
+7. Client Application
+
+   - Description: Simple application to test WebSocket server via Envoy.
+   - Functionality:
+     1. Creates 5 WebSocket connections from each client pod to Envoy. 1 new Connection attempt per 10 seconds
+     2. Randomly sends messages over existing connections. every 10-20 seconds.
+     3. Logs responses (timestamp, server pod IP).
+   - Containerization:
+     - Base Image Recommendation: 'python:3.10-alpine'
+     - Requirement: Dockerfile will be created.
+     - Image Build & Push: Separate Python script will build and push to 'cfndev-envoy-proxy-poc-client' ECR.
+   - Deployment:
+     - Requirement: Deploy as a Kubernetes Deployment.
+     - Replicas: 10 pods.
+     - Connectivity: Client pods connect to Envoy proxy's internal Kubernetes Service (or ALB internal IP).
+
+---
+
+8. Post-Deployment Verification & Access
+
+   - Verification Steps (manual after terraform deployment):
+     - Confirm terraform 'apply' success.
+     - Verify EKS cluster active and healthy ('kubectl cluster-info').
+     - Verify node group up (2 instances).
+     - Confirm ECR repos exist and contain images.
+     - Verify server (4 replicas) and client (10 replicas) pods running.
+     - Confirm Envoy proxy pods running.
+     - Verify AWS ALB provisioned and healthy.
+     - Test WebSocket connectivity (local machine to ALB endpoint).
+     - Inspect logs for correct message exchange.
+     - Observe Envoy logs for connection management.
+   - Access:
+     - Use 'aws eks update-kubeconfig --name envoy-poc --region <aws-region> --profile avive-cfndev-k8s'.
