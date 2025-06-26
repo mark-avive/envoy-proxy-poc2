@@ -37,16 +37,44 @@ AWS EKS cluster setup with Envoy proxy as a reverse proxy for WebSocket applicat
     │       ├── ecr-login.sh   # ECR Docker login
     │       ├── ecr-status.sh  # Repository status check
     │       └── ecr-cleanup.sh # Image cleanup
-    └── 05-server-application/ # Section 5: Server Application
-        ├── README.md          # Server application documentation
+    ├── 05-server-application/ # Section 5: Server Application
+    │   ├── README.md          # Server application documentation
+    │   ├── deploy.sh          # Deployment script
+    │   ├── locals.tf          # Configuration variables
+    │   ├── versions.tf        # Terraform and provider versions
+    │   ├── data.tf            # Remote state data sources
+    │   ├── null-resources.tf  # Build/deploy automation
+    │   ├── outputs.tf         # Resource outputs
+    │   ├── app/               # Python WebSocket server
+    │   ├── k8s/               # Kubernetes manifests
+    │   └── scripts/           # Deployment automation scripts
+    └── 06-envoy-proxy/       # Section 6: Envoy Proxy Setup
+        ├── README.md          # Envoy proxy documentation
+        ├── deploy.sh          # Deployment script
+        ├── locals.tf          # Configuration variables
+        ├── versions.tf        # Terraform and provider versions
+        ├── data.tf            # Remote state data sources
+        ├── alb-controller.tf  # AWS Load Balancer Controller
+        ├── null-resources.tf  # Envoy deployment automation
+        ├── outputs.tf         # Resource outputs
+        ├── k8s/               # Kubernetes manifests
+        │   ├── envoy-config.yaml # Envoy configuration
+        │   └── deployment.yaml   # Envoy deployment, service, ingress
+        └── scripts/           # Deployment automation scripts
+            ├── deploy-envoy.sh   # Deploy Envoy to Kubernetes
+            ├── wait-for-alb.sh   # Wait for ALB provisioning
+            ├── status-check.sh   # Status verification
+            └── cleanup-envoy.sh  # Cleanup resources
+    └── 07-client-application/ # Section 7: Client Application
+        ├── README.md          # Client application documentation
         ├── deploy.sh          # Deployment script
         ├── locals.tf          # Configuration variables
         ├── versions.tf        # Terraform and provider versions
         ├── data.tf            # Remote state data sources
         ├── null-resources.tf  # Build/deploy automation
         ├── outputs.tf         # Resource outputs
-        ├── app/               # Python WebSocket server
-        │   ├── server.py      # WebSocket server implementation
+        ├── app/               # Python WebSocket client
+        │   ├── client.py      # WebSocket client implementation
         │   ├── requirements.txt # Python dependencies
         │   └── Dockerfile     # Container definition
         ├── k8s/               # Kubernetes manifests
@@ -187,6 +215,38 @@ kubectl get ingress envoy-proxy-ingress
 kubectl port-forward deployment/envoy-proxy 9901:9901
 ```
 
+### ✅ Section 7: Client Application
+
+Deploys the WebSocket client application for testing the end-to-end system:
+- Python WebSocket client that creates 5 connections per pod to Envoy
+- 10 client pod replicas as specified in requirements
+- Attempts 1 new connection every 10 seconds until max connections reached
+- Randomly sends messages every 10-20 seconds over existing connections
+- Logs server responses with timestamps and pod IP addresses
+- Health check endpoint for Kubernetes monitoring
+- Tests rate limiting (1 connection/second) and connection limits (max 2 per server pod)
+
+**Usage:**
+```bash
+cd terraform/07-client-application
+./deploy.sh
+```
+
+**Monitoring:**
+```bash
+# Monitor client logs and WebSocket connections
+kubectl logs -l app=envoy-poc-client-app -f
+
+# Check connection establishment
+kubectl logs -l app=envoy-poc-client-app | grep "Connection"
+
+# Monitor message exchanges
+kubectl logs -l app=envoy-poc-client-app | grep "Response from server"
+
+# Check resource usage
+kubectl top pods -l app=envoy-poc-client-app
+```
+
 ## AWS Configuration
 
 - **AWS Profile**: `avive-cfndev-k8s` (AWS SSO)
@@ -213,7 +273,6 @@ export KUBECONFIG=/path/to/your/kubeconfig  # Use your preferred path
 ## Next Steps
 
 Implement remaining sections:
-- Section 7: Client Application
 - Section 8: Post-Deployment Verification
 
 ## Deployment Order
