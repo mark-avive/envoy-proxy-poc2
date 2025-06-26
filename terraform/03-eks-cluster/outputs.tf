@@ -98,3 +98,13 @@ output "kubectl_config" {
   description = "kubectl config command to configure access to the cluster"
   value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.envoy_poc_eks_cluster.name} --region ${local.aws_region} --profile ${local.aws_profile}"
 }
+
+output "kubeconfig_path" {
+  description = "Path to the kubeconfig file for this EKS cluster"
+  value       = local.kubeconfig_path
+}
+
+output "kubeconfig_export_command" {
+  description = "Environment variable export command for KUBECONFIG"
+  value       = "export KUBECONFIG=${local.kubeconfig_path}"
+}

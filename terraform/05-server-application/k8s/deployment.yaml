@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-poc-app-server
+  namespace: default
+  labels:
+    app: envoy-poc-app-server
+    component: websocket-server
+    version: v1.0.0
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: envoy-poc-app-server
+  template:
+    metadata:
+      labels:
+        app: envoy-poc-app-server
+        component: websocket-server
+        version: v1.0.0
+    spec:
+      containers:
+      - name: websocket-server
+        image: ${ECR_REPOSITORY_URL}:latest
+        ports:
+        - containerPort: 8080
+          name: websocket
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        env:
+        - name: SERVER_HOST
+          value: "0.0.0.0"
+        - name: SERVER_PORT
+          value: "8080"
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-poc-app-server-service
+  namespace: default
+  labels:
+    app: envoy-poc-app-server
+    component: websocket-server
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: websocket
+  selector:
+    app: envoy-poc-app-server

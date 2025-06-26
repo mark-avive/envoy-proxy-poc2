@@ -69,13 +69,21 @@ case "${1:-apply}" in
             echo ""
             echo "✓ EKS cluster infrastructure deployed successfully!"
             echo ""
-            echo "Next steps:"
-            echo "1. Configure kubectl access:"
-            echo "   aws eks update-kubeconfig --name envoy-poc --region us-west-2 --profile avive-cfndev-k8s"
+            echo "Kubeconfig has been automatically configured."
+            echo "The kubeconfig path used was determined by:"
+            echo "  1. KUBECONFIG environment variable (if set)"
+            echo "  2. Default: /home/mark/.kube/config-cfndev-envoy-poc"
             echo ""
-            echo "2. Verify cluster status:"
-            echo "   kubectl cluster-info"
-            echo "   kubectl get nodes"
+            echo "To use this cluster:"
+            if [ -n "$KUBECONFIG" ]; then
+                echo "  Your KUBECONFIG is already set to: $KUBECONFIG"
+            else
+                echo "  export KUBECONFIG=/home/mark/.kube/config-cfndev-envoy-poc"
+            fi
+            echo ""
+            echo "Verify cluster status:"
+            echo "  kubectl cluster-info"
+            echo "  kubectl get nodes"
             echo ""
         else
             echo "Deployment cancelled by user"
@@ -111,8 +119,19 @@ case "${1:-apply}" in
         echo "AWS EKS cluster status:"
         aws eks describe-cluster --name "$CLUSTER_NAME" --profile avive-cfndev-k8s --query 'cluster.{Name:name,Status:status,Version:version,Endpoint:endpoint}' --output table 2>/dev/null || echo "Cluster not found or not accessible"
         echo ""
-        echo "kubectl configuration:"
-        echo "Run: aws eks update-kubeconfig --name $CLUSTER_NAME --region us-west-2 --profile avive-cfndev-k8s"
+        echo "Kubeconfig configuration:"
+        KUBECONFIG_PATH="${KUBECONFIG:-/home/mark/.kube/config-cfndev-envoy-poc}"
+        if [ -f "$KUBECONFIG_PATH" ]; then
+            echo "✓ Kubeconfig exists at: $KUBECONFIG_PATH"
+            echo "To use: export KUBECONFIG=$KUBECONFIG_PATH"
+            echo ""
+            echo "Testing kubectl connection..."
+            KUBECONFIG="$KUBECONFIG_PATH" kubectl cluster-info 2>/dev/null && echo "✓ kubectl connection successful" || echo "✗ kubectl connection failed"
+        else
+            echo "✗ Kubeconfig not found at: $KUBECONFIG_PATH"
+            echo "Run deployment first or manually configure:"
+            echo "  aws eks update-kubeconfig --name $CLUSTER_NAME --region us-west-2 --profile avive-cfndev-k8s --kubeconfig $KUBECONFIG_PATH"
+        fi
         rm -f /tmp/cluster_name
         ;;
     *)

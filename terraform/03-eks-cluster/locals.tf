@@ -19,6 +19,10 @@ locals {
   aws_region  = "us-west-2"
   aws_profile = "avive-cfndev-k8s"
   
+  # Kubeconfig Configuration
+  # Uses variable input or falls back to default path
+  kubeconfig_path = var.kubeconfig_path != "" ? var.kubeconfig_path : "/home/mark/.kube/config-cfndev-envoy-poc"
+  
   # CloudWatch Log Groups
   cluster_log_types = ["api", "audit", "authenticator", "scheduler"]
   
