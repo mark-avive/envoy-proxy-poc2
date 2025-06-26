@@ -158,6 +158,35 @@ kubectl get service envoy-poc-app-server-service
 kubectl port-forward service/envoy-poc-app-server-service 8080:80
 ```
 
+### ✅ Section 6: Envoy Proxy Setup
+
+Deploys Envoy proxy as a reverse proxy with AWS Load Balancer Controller:
+- AWS Load Balancer Controller installed via Helm
+- Envoy proxy with 2 replicas for WebSocket handling
+- Application Load Balancer (ALB) for external access
+- Rate limiting: 1 connection per second
+- Connection limiting: max 8 connections (2 per backend pod)
+- WebSocket upgrade support and health checks
+- Admin interface on port 9901 for monitoring
+
+**Usage:**
+```bash
+cd terraform/06-envoy-proxy
+./deploy.sh apply
+```
+
+**Verification:**
+```bash
+# Check ALB endpoint
+kubectl get ingress envoy-proxy-ingress
+
+# Test WebSocket connectivity
+./deploy.sh status
+
+# Monitor Envoy admin interface
+kubectl port-forward deployment/envoy-proxy 9901:9901
+```
+
 ## AWS Configuration
 
 - **AWS Profile**: `avive-cfndev-k8s` (AWS SSO)
@@ -184,7 +213,6 @@ export KUBECONFIG=/path/to/your/kubeconfig  # Use your preferred path
 ## Next Steps
 
 Implement remaining sections:
-- Section 6: Envoy Proxy Setup
 - Section 7: Client Application
 - Section 8: Post-Deployment Verification
 
@@ -195,5 +223,6 @@ The sections have dependencies and should be deployed in this order:
 2. **Section 3**: EKS Cluster (depends on networking)
 3. **Section 4**: ECR Repositories (independent, can be deployed anytime)
 4. **Section 5**: Server Application (depends on EKS and ECR)
-5. **Sections 6-7**: Envoy and Client Applications (depend on Section 5)
-6. **Section 8**: Verification
+5. **Section 6**: Envoy Proxy Setup (depends on EKS and Server Application)
+6. **Section 7**: Client Application (depends on Envoy Proxy)
+7. **Section 8**: Verification

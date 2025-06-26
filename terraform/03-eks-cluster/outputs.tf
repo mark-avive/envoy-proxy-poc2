@@ -93,6 +93,11 @@ output "cluster_oidc_issuer_url" {
   value       = aws_eks_cluster.envoy_poc_eks_cluster.identity[0].oidc[0].issuer
 }
 
+output "cluster_oidc_provider_arn" {
+  description = "ARN of the OIDC Provider for the EKS cluster"
+  value       = aws_iam_openid_connect_provider.eks_cluster_oidc.arn
+}
+
 # Kubectl Configuration
 output "kubectl_config" {
   description = "kubectl config command to configure access to the cluster"
