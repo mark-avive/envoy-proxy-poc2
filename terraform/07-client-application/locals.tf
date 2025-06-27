@@ -4,10 +4,16 @@ locals {
   environment  = "dev"
   
   # Application Configuration
-  app_name        = "websocket-client"
+  app_name        = "envoy-poc-client-app"
   app_version     = "1.0.0"
   container_port  = 8081
   replicas        = 10
+  
+  # Client Behavior Configuration
+  max_connections      = 5     # WebSocket connections per client pod
+  connection_interval  = 10    # Seconds between connection attempts
+  message_interval_min = 10    # Minimum seconds between messages
+  message_interval_max = 20    # Maximum seconds between messages
   
   # ECR Configuration
   ecr_repository_name = "cfndev-envoy-proxy-poc-client"

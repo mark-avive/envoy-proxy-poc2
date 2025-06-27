@@ -51,6 +51,17 @@ echo "Deployment manifest prepared: $TEMP_MANIFEST"
 
 # Deploy to Kubernetes
 echo "Deploying Envoy proxy to Kubernetes..."
+
+# First apply the ConfigMap with templated configuration
+echo "Applying templated Envoy configuration..."
+kubectl create configmap envoy-config --from-file=envoy.yaml="$K8S_DIR/envoy-config.yaml" --dry-run=client -o yaml | kubectl apply -f -
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to apply Envoy configuration"
+    rm -f "$TEMP_MANIFEST"
+    exit 1
+fi
+
+# Then apply the deployment manifest
 kubectl apply -f "$TEMP_MANIFEST"
 if [ $? -ne 0 ]; then
     echo "Error: Failed to deploy Envoy proxy"

@@ -1,39 +1,39 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: envoy-poc-app-server
-  namespace: default
+  name: ${app_name}
+  namespace: ${namespace}
   labels:
-    app: envoy-poc-app-server
+    app: ${app_name}
     component: websocket-server
-    version: 1.0.0
+    version: ${app_version}
 spec:
-  replicas: 5
+  replicas: ${replicas}
   selector:
     matchLabels:
-      app: envoy-poc-app-server
+      app: ${app_name}
   template:
     metadata:
       labels:
-        app: envoy-poc-app-server
+        app: ${app_name}
         component: websocket-server
-        version: 1.0.0
+        version: ${app_version}
     spec:
       containers:
       - name: websocket-server
-        image: 135135497055.dkr.ecr.us-west-2.amazonaws.com/cfndev-envoy-proxy-poc-app:latest
+        image: ${ecr_repository_url}:${image_tag}
         ports:
-        - containerPort: 8080
+        - containerPort: ${container_port}
           name: websocket
           protocol: TCP
-        - containerPort: 8081
+        - containerPort: ${health_port}
           name: health
           protocol: TCP
         env:
         - name: SERVER_HOST
           value: "0.0.0.0"
         - name: SERVER_PORT
-          value: "8080"
+          value: "${container_port}"
         - name: POD_IP
           valueFrom:
             fieldRef:
@@ -44,15 +44,15 @@ spec:
               fieldPath: metadata.name
         resources:
           requests:
-            cpu: 50m
-            memory: 64Mi
+            cpu: ${cpu_request}
+            memory: ${memory_request}
           limits:
-            cpu: 100m
-            memory: 128Mi
+            cpu: ${cpu_limit}
+            memory: ${memory_limit}
         livenessProbe:
           httpGet:
             path: /health
-            port: 8081
+            port: ${health_port}
             scheme: HTTP
           initialDelaySeconds: 30
           periodSeconds: 30
@@ -61,7 +61,7 @@ spec:
         readinessProbe:
           httpGet:
             path: /health
-            port: 8081
+            port: ${health_port}
             scheme: HTTP
           initialDelaySeconds: 5
           periodSeconds: 10
@@ -82,17 +82,17 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: envoy-poc-app-server-service
-  namespace: default
+  name: ${service_name}
+  namespace: ${namespace}
   labels:
-    app: envoy-poc-app-server
+    app: ${app_name}
     component: websocket-server
 spec:
   type: ClusterIP
   ports:
-  - port: 80
-    targetPort: 8080
+  - port: ${service_port}
+    targetPort: ${container_port}
     protocol: TCP
     name: websocket
   selector:
-    app: envoy-poc-app-server
+    app: ${app_name}

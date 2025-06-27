@@ -26,6 +26,17 @@ locals {
   max_connections_per_pod = 2
   connection_rate_limit = "1/s"  # 1 connection per second
   
+  # Rate Limiting Token Bucket Settings
+  max_tokens      = 10    # Maximum tokens in bucket
+  tokens_per_fill = 1     # Tokens added per interval  
+  fill_interval   = "1s"  # Token refill interval
+  
+  # Circuit Breaker Configuration
+  max_connections      = 10   # 5 backend pods * 2 connections per pod
+  max_pending_requests = 10   # Queue limit for pending requests
+  max_requests         = 20   # Active request limit
+  max_retries          = 3    # Retry limit
+  
   # Common Tags
   common_tags = {
     Project     = local.project_name

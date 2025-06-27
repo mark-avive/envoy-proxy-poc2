@@ -38,11 +38,18 @@ resource "null_resource" "build_and_push" {
 resource "null_resource" "deploy_k8s" {
   # Trigger re-run when any of these change
   triggers = {
-    deployment_yaml_hash = filemd5("${path.module}/k8s/deployment.yaml")
+    deployment_yaml_hash = local_file.deployment_manifest.content_md5
     deploy_script_hash   = filemd5("${path.module}/scripts/deploy-k8s.sh")
     
     # Reference the build output to ensure proper ordering
     build_completed      = null_resource.build_and_push.id
+    
+    # Locals hash to trigger on configuration changes
+    locals_hash = sha256(jsonencode({
+      replicas     = local.replicas
+      cpu_limit    = local.cpu_limit
+      memory_limit = local.memory_limit
+    }))
     
     # Static values for reference
     cluster_name         = local.cluster_name
@@ -76,7 +83,8 @@ resource "null_resource" "deploy_k8s" {
   depends_on = [
     null_resource.build_and_push,
     data.terraform_remote_state.eks,
-    data.aws_eks_cluster.cluster
+    data.aws_eks_cluster.cluster,
+    local_file.deployment_manifest
   ]
 }
 

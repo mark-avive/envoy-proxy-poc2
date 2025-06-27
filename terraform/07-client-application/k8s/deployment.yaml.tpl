@@ -1,34 +1,34 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: envoy-poc-client-app
-  namespace: default
+  name: ${app_name}
+  namespace: ${namespace}
   labels:
-    app: envoy-poc-client-app
+    app: ${app_name}
     component: websocket-client
-    version: 1.0.0
+    version: ${app_version}
 spec:
-  replicas: 10
+  replicas: ${replicas}
   selector:
     matchLabels:
-      app: envoy-poc-client-app
+      app: ${app_name}
   template:
     metadata:
       labels:
-        app: envoy-poc-client-app
+        app: ${app_name}
         component: websocket-client
-        version: 1.0.0
+        version: ${app_version}
     spec:
       containers:
       - name: websocket-client
         image: IMAGE_REGISTRY_PLACEHOLDER
         ports:
-        - containerPort: 8081
+        - containerPort: ${container_port}
           name: health
           protocol: TCP
         env:
         - name: ENVOY_ENDPOINT
-          value: "ws://envoy-proxy-service.default.svc.cluster.local:80"
+          value: "ws://envoy-proxy-service.${namespace}.svc.cluster.local:80"
         - name: CLIENT_ID
           valueFrom:
             fieldRef:
@@ -38,26 +38,26 @@ spec:
             fieldRef:
               fieldPath: status.podIP
         - name: HEALTH_PORT
-          value: "8081"
+          value: "${container_port}"
         - name: MAX_CONNECTIONS
-          value: "5"
+          value: "${max_connections}"
         - name: CONNECTION_INTERVAL
-          value: "10"
+          value: "${connection_interval}"
         - name: MESSAGE_INTERVAL_MIN
-          value: "10"
+          value: "${message_interval_min}"
         - name: MESSAGE_INTERVAL_MAX
-          value: "20"
+          value: "${message_interval_max}"
         resources:
           requests:
-            cpu: 50m
-            memory: 64Mi
+            cpu: ${cpu_request}
+            memory: ${memory_request}
           limits:
-            cpu: 100m
-            memory: 128Mi
+            cpu: ${cpu_limit}
+            memory: ${memory_limit}
         livenessProbe:
           httpGet:
             path: /health
-            port: 8081
+            port: ${container_port}
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
@@ -65,7 +65,7 @@ spec:
         readinessProbe:
           httpGet:
             path: /health
-            port: 8081
+            port: ${container_port}
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 3
@@ -77,17 +77,17 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: envoy-poc-client-service
-  namespace: default
+  name: ${service_name}
+  namespace: ${namespace}
   labels:
-    app: envoy-poc-client-app
+    app: ${app_name}
     component: websocket-client
 spec:
   type: ClusterIP
   ports:
-  - port: 8081
-    targetPort: 8081
+  - port: ${service_port}
+    targetPort: ${container_port}
     protocol: TCP
     name: health
   selector:
-    app: envoy-poc-client-app
+    app: ${app_name}

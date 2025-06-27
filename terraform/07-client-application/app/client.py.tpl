@@ -3,9 +3,9 @@
 WebSocket Client Application for Envoy Proxy POC
 
 This client application:
-1. Creates 5 WebSocket connections from each client pod to Envoy proxy
-2. Attempts 1 new connection per 10 seconds
-3. Randomly sends messages over existing connections every 10-20 seconds
+1. Creates ${max_connections} WebSocket connections from each client pod to Envoy proxy
+2. Attempts 1 new connection per ${connection_interval} seconds
+3. Randomly sends messages over existing connections every ${message_interval_min}-${message_interval_max} seconds
 4. Logs responses (timestamp, server pod IP)
 5. Provides HTTP health endpoint for Kubernetes health checks
 """
@@ -37,10 +37,10 @@ class WebSocketClient:
         self.client_id = client_id
         self.envoy_endpoint = envoy_endpoint
         self.connections: List[websockets.WebSocketServerProtocol] = []
-        self.max_connections = int(os.getenv('MAX_CONNECTIONS', '5'))
-        self.connection_interval = int(os.getenv('CONNECTION_INTERVAL', '10'))  # seconds
-        self.message_interval_min = int(os.getenv('MESSAGE_INTERVAL_MIN', '10'))  # seconds
-        self.message_interval_max = int(os.getenv('MESSAGE_INTERVAL_MAX', '20'))  # seconds
+        self.max_connections = int(os.getenv('MAX_CONNECTIONS', '${max_connections}'))
+        self.connection_interval = int(os.getenv('CONNECTION_INTERVAL', '${connection_interval}'))  # seconds
+        self.message_interval_min = int(os.getenv('MESSAGE_INTERVAL_MIN', '${message_interval_min}'))  # seconds
+        self.message_interval_max = int(os.getenv('MESSAGE_INTERVAL_MAX', '${message_interval_max}'))  # seconds
         self.running = False
         self.connection_tasks: Set[asyncio.Task] = set()
         self.message_tasks: Set[asyncio.Task] = set()

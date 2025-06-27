@@ -56,9 +56,9 @@ static_resources:
               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
               stat_prefix: websocket_rate_limiter
               token_bucket:
-                max_tokens: 10
-                tokens_per_fill: 1
-                fill_interval: 1s
+                max_tokens: ${max_tokens}
+                tokens_per_fill: ${tokens_per_fill}
+                fill_interval: ${fill_interval}
               filter_enabled:
                 runtime_key: rate_limit_enabled
                 default_value:
@@ -95,10 +95,10 @@ static_resources:
     circuit_breakers:
       thresholds:
       - priority: DEFAULT
-        max_connections: 10
-        max_pending_requests: 10
-        max_requests: 20
-        max_retries: 3
+        max_connections: ${max_connections}
+        max_pending_requests: ${max_pending_requests}
+        max_requests: ${max_requests}
+        max_retries: ${max_retries}
     health_checks:
     - timeout: 5s
       interval: 10s

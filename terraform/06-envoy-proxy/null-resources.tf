@@ -2,12 +2,18 @@
 resource "null_resource" "deploy_envoy" {
   depends_on = [
     helm_release.aws_load_balancer_controller,
-    data.terraform_remote_state.server_app
+    data.terraform_remote_state.server_app,
+    local_file.envoy_config
   ]
 
   triggers = {
-    envoy_config_hash = sha256(file("${path.module}/k8s/deployment.yaml"))
+    envoy_config_hash = local_file.envoy_config.content_md5
     alb_controller_deployed = helm_release.aws_load_balancer_controller.status
+    locals_hash = sha256(jsonencode({
+      max_connections = local.max_connections
+      max_tokens = local.max_tokens
+      tokens_per_fill = local.tokens_per_fill
+    }))
   }
 
   provisioner "local-exec" {

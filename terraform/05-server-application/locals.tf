@@ -4,10 +4,11 @@ locals {
   environment  = "dev"
   
   # Application Configuration
-  app_name        = "websocket-server"
+  app_name        = "envoy-poc-app-server"
   app_version     = "1.0.0"
   container_port  = 8080
-  replicas        = 4
+  health_port     = 8081
+  replicas        = 5
   
   # ECR Configuration
   ecr_repository_name = "cfndev-envoy-proxy-poc-app"
