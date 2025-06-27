@@ -2,6 +2,47 @@
 
 AWS EKS cluster setup with Envoy proxy as a reverse proxy for WebSocket applications.
 
+## Quick Start - Monitoring & Configuration
+
+### 🔧 Configuration & Monitoring Scripts (At Repository Root)
+
+```bash
+# Comprehensive monitoring of all Envoy metrics and WebSocket connections
+./envoy-monitor.sh                    # One-time monitoring report
+./envoy-monitor.sh -w                 # Continuous monitoring (refreshes every 5s)
+
+# Configuration summary across all Terraform sections
+./config-summary.sh                  # View current configs from all locals.tf files
+```
+
+**Prerequisites for monitoring:** 
+```bash
+# Set up port-forward to access Envoy admin interface
+kubectl port-forward svc/envoy-proxy-service 9901:9901
+```
+
+### 📊 Key Metrics Monitored
+
+- **WebSocket Connections**: Active connections per pod, total created, failures
+- **Circuit Breaker Status**: Connection limits, pool status, breaker open/closed
+- **Rate Limiting**: Tokens, fill rate, requests limited vs allowed
+- **Connection Lifecycle**: Created, destroyed (by client vs server), timeouts
+- **Cluster Health**: Health checks, endpoint status
+- **Kubernetes Status**: Pod health across all components
+
+### ⚙️ Configuration Automation
+
+All configuration changes in `locals.tf` files automatically propagate to deployed resources:
+
+1. **Edit configuration**: `vim terraform/<section>/locals.tf`
+2. **Apply changes**: `cd terraform/<section> && terraform apply`
+3. **Monitor results**: `./envoy-monitor.sh`
+
+**Example load testing scenarios:**
+- High connection limit + Low rate limit = Test rate limiting
+- Low connection limit + High rate limit = Test circuit breaker  
+- Many client pods + Normal limits = Test load distribution
+
 ## Project Structure
 
 ```

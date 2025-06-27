@@ -1,0 +1,44 @@
+# ENVOY WEBSOCKET MONITORING COMMANDS
+# Run these individually after setting up: kubectl port-forward svc/envoy-proxy-service 9901:9901
+
+# A) Max WebSocket connections per pod (Circuit Breaker Setting):
+curl -s http://localhost:9901/config_dump | jq -r '.configs[1].static_clusters[0].cluster.circuit_breakers.thresholds[0].max_connections'
+
+# B) Current established WebSocket connections per pod:
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_active:" | awk '{print $2}'
+
+# C) Rate limiting configuration (new connection max rate):
+curl -s http://localhost:9901/config_dump | jq -r '.configs[] | select(.["@type"] == "type.googleapis.com/envoy.admin.v3.ListenersConfigDump") | .static_listeners[0].listener.filter_chains[0].filters[0].typed_config.http_filters[] | select(.name == "envoy.filters.http.local_ratelimit") | .typed_config.token_bucket'
+
+# D) Current total WebSocket connections held by Envoy:
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_total:" | awk '{print "Total created: " $2}'
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_active:" | awk '{print "Currently active: " $2}'
+
+# E) WebSocket connection rejections (circuit breaker open):
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.circuit_breakers.default.cx_open:" | awk '{print "Circuit breaker open count: " $2}'
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.circuit_breakers.default.cx_pool_full:" | awk '{print "Connection pool full count: " $2}'
+
+# F) Rate limiting rejections:
+curl -s http://localhost:9901/stats | grep "local_rate_limit.*rate_limited:" | awk '{print "Rate limited requests: " $2}'
+
+# G) WebSocket connections dropped/destroyed:
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_destroy:" | awk '{print "Total destroyed: " $2}'
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_destroy_local:" | awk '{print "Destroyed by client: " $2}'
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_destroy_remote:" | awk '{print "Destroyed by server: " $2}'
+
+# H) Connection failures:
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_connect_fail:" | awk '{print "Connection failures: " $2}'
+curl -s http://localhost:9901/stats | grep "cluster.websocket_cluster.upstream_cx_connect_timeout:" | awk '{print "Connection timeouts: " $2}'
+
+# I) Real-time monitoring commands:
+# Watch active connections:
+watch -n 2 'curl -s http://localhost:9901/stats | grep cluster.websocket_cluster.upstream_cx_active:'
+
+# Monitor rate limiting:
+watch -n 1 'curl -s http://localhost:9901/stats | grep local_rate_limit'
+
+# View all WebSocket related stats:
+curl -s http://localhost:9901/stats | grep -E "(websocket|upgrade)"
+
+# Check cluster health status:
+curl -s http://localhost:9901/clusters | grep -A 10 websocket_cluster
