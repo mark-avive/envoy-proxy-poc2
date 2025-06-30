@@ -37,6 +37,10 @@ locals {
   max_requests         = 20   # Active request limit
   max_retries          = 3    # Retry limit
   
+  # Server Service Configuration for DNS Discovery
+  server_service_name = "envoy-poc-app-server-service"
+  server_service_port = 8080
+  
   # Common Tags
   common_tags = {
     Project     = local.project_name

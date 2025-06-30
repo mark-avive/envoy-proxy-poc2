@@ -33,8 +33,16 @@ else
 fi
 echo ""
 
+# Parse command line arguments
+ACTION="${1:-apply}"
+
+# Check for --destroy flag
+if [[ "$1" == "--destroy" ]]; then
+    ACTION="destroy"
+fi
+
 # Handle command line arguments
-case "${1:-apply}" in
+case "$ACTION" in
     "init")
         echo "Initializing Terraform..."
         run_terraform "init"
@@ -76,7 +84,7 @@ case "${1:-apply}" in
         run_terraform "output"
         ;;
     *)
-        echo "Usage: $0 [init|plan|apply|destroy|output]"
+        echo "Usage: $0 [init|plan|apply|destroy|output] or $0 --destroy"
         echo ""
         echo "Commands:"
         echo "  init     - Initialize Terraform"
@@ -84,6 +92,9 @@ case "${1:-apply}" in
         echo "  apply    - Deploy the infrastructure (default)"
         echo "  destroy  - Destroy the infrastructure"
         echo "  output   - Show terraform outputs"
+        echo ""
+        echo "Flags:"
+        echo "  --destroy - Same as 'destroy' command"
         exit 1
         ;;
 esac

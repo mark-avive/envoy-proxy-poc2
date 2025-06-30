@@ -1,16 +1,6 @@
-# OIDC Provider for EKS cluster (required for IRSA - IAM Roles for Service Accounts)
-data "tls_certificate" "eks_cluster_oidc" {
+# Reference the existing OIDC Provider created in the EKS cluster section
+data "aws_iam_openid_connect_provider" "eks_cluster_oidc" {
   url = data.aws_eks_cluster.cluster.identity[0].oidc[0].issuer
-}
-
-resource "aws_iam_openid_connect_provider" "eks_cluster_oidc" {
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.eks_cluster_oidc.certificates[0].sha1_fingerprint]
-  url             = data.aws_eks_cluster.cluster.identity[0].oidc[0].issuer
-
-  tags = merge(local.common_tags, {
-    Name = "${local.project_name}-oidc-provider"
-  })
 }
 
 # IAM Role for AWS Load Balancer Controller
@@ -24,7 +14,7 @@ resource "aws_iam_role" "aws_load_balancer_controller" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Effect = "Allow"
         Principal = {
-          Federated = aws_iam_openid_connect_provider.eks_cluster_oidc.arn
+          Federated = data.aws_iam_openid_connect_provider.eks_cluster_oidc.arn
         }
         Condition = {
           StringEquals = {

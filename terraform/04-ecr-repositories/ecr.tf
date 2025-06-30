@@ -2,6 +2,7 @@
 resource "aws_ecr_repository" "envoy_poc_app_repository" {
   name                 = local.app_repository_name
   image_tag_mutability = local.image_tag_mutability
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = local.scan_on_push
@@ -22,6 +23,7 @@ resource "aws_ecr_repository" "envoy_poc_app_repository" {
 resource "aws_ecr_repository" "envoy_poc_client_repository" {
   name                 = local.client_repository_name
   image_tag_mutability = local.image_tag_mutability
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = local.scan_on_push

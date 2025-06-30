@@ -89,6 +89,7 @@ metadata:
     component: websocket-server
 spec:
   type: ClusterIP
+  clusterIP: None  # Headless service - DNS returns individual pod IPs
   ports:
   - port: 80
     targetPort: 8080

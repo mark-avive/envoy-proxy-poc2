@@ -92,10 +92,11 @@ static_resources:
     connect_timeout: 30s
     type: STRICT_DNS
     lb_policy: ROUND_ROBIN
+    dns_lookup_family: V4_ONLY
     circuit_breakers:
       thresholds:
       - priority: DEFAULT
-        max_connections: ${max_connections}
+        max_connections: ${max_connections_per_pod}
         max_pending_requests: ${max_pending_requests}
         max_requests: ${max_requests}
         max_retries: ${max_retries}
@@ -107,7 +108,6 @@ static_resources:
       healthy_threshold: 2
       http_health_check:
         path: "/health"
-        host: "backend"
         request_headers_to_add:
         - header:
             key: "x-envoy-health-check"
@@ -120,8 +120,14 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: envoy-poc-app-server-service.default.svc.cluster.local
-                port_value: 80
+                address: ${server_service_name}.${namespace}.svc.cluster.local
+                port_value: ${server_service_port}
+    # Enable individual endpoint health checking and load balancing
+    outlier_detection:
+      consecutive_5xx: 3
+      interval: 30s
+      base_ejection_time: 30s
+      max_ejection_percent: 50
     # Connection pool settings for WebSocket connections
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:

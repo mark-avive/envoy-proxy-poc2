@@ -4,14 +4,7 @@ resource "aws_security_group" "envoy_poc_eks_cluster_sg" {
   description = "Security group for EKS cluster control plane"
   vpc_id      = aws_vpc.envoy_poc_vpc.id
   
-  # Allow all outbound traffic
-  egress {
-    description = "All outbound traffic"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # All rules are managed as separate resources
   
   tags = merge(local.common_tags, {
     Name = "${local.project_name}-eks-cluster-sg"
@@ -25,23 +18,7 @@ resource "aws_security_group" "envoy_poc_worker_node_sg" {
   description = "Security group for EKS worker nodes"
   vpc_id      = aws_vpc.envoy_poc_vpc.id
   
-  # Allow communication between worker nodes
-  ingress {
-    description = "Node to node communication"
-    from_port   = 0
-    to_port     = 65535
-    protocol    = "tcp"
-    self        = true
-  }
-  
-  # Allow all outbound traffic
-  egress {
-    description = "All outbound traffic"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # All rules are managed as separate resources
   
   tags = merge(local.common_tags, {
     Name = "${local.project_name}-worker-node-sg"
@@ -55,33 +32,6 @@ resource "aws_security_group" "envoy_poc_alb_sg" {
   description = "Security group for Application Load Balancer"
   vpc_id      = aws_vpc.envoy_poc_vpc.id
   
-  # Allow HTTP traffic from internet
-  ingress {
-    description = "HTTP from internet"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
-  # Allow HTTPS traffic from internet (for future use)
-  ingress {
-    description = "HTTPS from internet"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
-  # Allow all outbound traffic
-  egress {
-    description = "All outbound traffic"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
   tags = merge(local.common_tags, {
     Name = "${local.project_name}-alb-sg"
     Purpose = "ALB-SecurityGroup"
@@ -93,33 +43,6 @@ resource "aws_security_group" "envoy_poc_envoy_service_sg" {
   name_prefix = "${local.project_name}-envoy-service-"
   description = "Security group for Envoy proxy service"
   vpc_id      = aws_vpc.envoy_poc_vpc.id
-  
-  # Allow HTTP traffic from internet (through ALB)
-  ingress {
-    description = "HTTP from internet"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
-  # Allow Envoy admin interface access from VPC
-  ingress {
-    description = "Envoy admin interface from VPC"
-    from_port   = 9901
-    to_port     = 9901
-    protocol    = "tcp"
-    cidr_blocks = [local.vpc_cidr]
-  }
-  
-  # Allow all outbound traffic
-  egress {
-    description = "All outbound traffic"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
   
   tags = merge(local.common_tags, {
     Name = "${local.project_name}-envoy-service-sg"
@@ -140,7 +63,27 @@ resource "aws_security_group_rule" "eks_cluster_ingress_from_workers" {
   description              = "HTTPS from worker nodes"
 }
 
+resource "aws_security_group_rule" "eks_cluster_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.envoy_poc_eks_cluster_sg.id
+  description       = "All outbound traffic"
+}
+
 # Worker Node Security Group Rules
+resource "aws_security_group_rule" "worker_node_ingress_self" {
+  type              = "ingress"
+  from_port         = 0
+  to_port           = 65535
+  protocol          = "tcp"
+  self              = true
+  security_group_id = aws_security_group.envoy_poc_worker_node_sg.id
+  description       = "Node to node communication"
+}
+
 resource "aws_security_group_rule" "worker_node_ingress_from_cluster" {
   type                     = "ingress"
   from_port                = 1025
@@ -171,6 +114,16 @@ resource "aws_security_group_rule" "worker_node_ingress_from_alb" {
   description              = "Communication from ALB"
 }
 
+resource "aws_security_group_rule" "worker_node_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.envoy_poc_worker_node_sg.id
+  description       = "All outbound traffic"
+}
+
 # ALB Security Group Rules
 resource "aws_security_group_rule" "alb_egress_to_workers" {
   type                     = "egress"
@@ -192,7 +145,58 @@ resource "aws_security_group_rule" "alb_egress_to_envoy" {
   description              = "To Envoy service"
 }
 
-# Envoy Service Security Group Rules
+# ALB ingress rules (previously inline)
+resource "aws_security_group_rule" "alb_ingress_http" {
+  type              = "ingress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.envoy_poc_alb_sg.id
+  description       = "HTTP from internet"
+}
+
+resource "aws_security_group_rule" "alb_ingress_https" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.envoy_poc_alb_sg.id
+  description       = "HTTPS from internet"
+}
+
+resource "aws_security_group_rule" "alb_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.envoy_poc_alb_sg.id
+  description       = "All outbound traffic"
+}
+
+# Envoy Service ingress rules (previously inline)
+resource "aws_security_group_rule" "envoy_service_ingress_admin" {
+  type              = "ingress"
+  from_port         = 9901
+  to_port           = 9901
+  protocol          = "tcp"
+  cidr_blocks       = [local.vpc_cidr]
+  security_group_id = aws_security_group.envoy_poc_envoy_service_sg.id
+  description       = "Envoy admin interface from VPC"
+}
+
+resource "aws_security_group_rule" "envoy_service_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.envoy_poc_envoy_service_sg.id
+  description       = "All outbound traffic"
+}
+
 resource "aws_security_group_rule" "envoy_service_ingress_from_alb" {
   type                     = "ingress"
   from_port                = 80

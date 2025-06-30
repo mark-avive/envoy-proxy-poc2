@@ -41,3 +41,13 @@ data "aws_eks_cluster_auth" "cluster" {
 # AWS Account and Region data
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
+
+# Get server service endpoints for validation
+data "kubernetes_endpoints_v1" "server_endpoints" {
+  metadata {
+    name      = local.backend_service_name
+    namespace = local.namespace
+  }
+  
+  depends_on = [data.terraform_remote_state.server_app]
+}
