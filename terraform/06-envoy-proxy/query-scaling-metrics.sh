@@ -40,14 +40,14 @@ get_pod_connections() {
     echo "=================================="
     
     # Get all pod connection keys
-    local pod_keys=$(redis_exec KEYS "pod:established_count:*" 2>/dev/null || echo "")
+    local pod_keys=$(redis_exec KEYS "pod:established_count:*" 2>/dev/null)
     
     if [[ -z "$pod_keys" ]]; then
         echo "   No pod connection data found"
         return
     fi
     
-    echo "$pod_keys" | while read -r key; do
+    echo "$pod_keys" | while IFS= read -r key; do
         if [[ -n "$key" ]]; then
             local pod_ip=$(echo "$key" | sed 's/pod:established_count://')
             local count=$(redis_exec GET "$key" 2>/dev/null || echo "0")
@@ -101,12 +101,25 @@ get_scaling_recommendations() {
     echo "🎯 Scaling Recommendations:"
     echo "==========================="
     
-    local candidates=$(redis_exec ZREVRANGE "scaling:candidates:scale_down" 0 -1 WITHSCORES 2>/dev/null || echo "")
+    # Get scale-down candidates with scores
+    local candidates=$(redis_exec ZREVRANGE "scaling:candidates:scale_down" 0 -1 WITHSCORES 2>/dev/null)
     
     if [[ -n "$candidates" ]]; then
         echo ""
         echo "Scale-Down Priority (highest priority first):"
-        echo "$candidates" | while read -r pod_ip score; do
+        
+        # Parse the output properly
+        local items=()
+        while IFS= read -r line; do
+            if [[ -n "$line" ]]; then
+                items+=("$line")
+            fi
+        done <<< "$candidates"
+        
+        # Process pairs (pod_ip, score)
+        for ((i=0; i<${#items[@]}; i+=2)); do
+            local pod_ip="${items[i]}"
+            local score="${items[i+1]}"
             if [[ -n "$pod_ip" && -n "$score" ]]; then
                 printf "   %-20s (priority: %s)\n" "$pod_ip" "$score"
             fi
@@ -122,14 +135,14 @@ get_detailed_pod_metrics() {
     echo "📈 Detailed Pod Scaling Metrics:"
     echo "================================="
     
-    local scaling_keys=$(redis_exec KEYS "pod:scaling_data:*" 2>/dev/null || echo "")
+    local scaling_keys=$(redis_exec KEYS "pod:scaling_data:*" 2>/dev/null)
     
     if [[ -z "$scaling_keys" ]]; then
         echo "   No detailed pod metrics found"
         return
     fi
     
-    echo "$scaling_keys" | while read -r key; do
+    echo "$scaling_keys" | while IFS= read -r key; do
         if [[ -n "$key" ]]; then
             local pod_ip=$(echo "$key" | sed 's/pod:scaling_data://')
             echo ""
@@ -137,9 +150,20 @@ get_detailed_pod_metrics() {
             echo "-------------------"
             
             # Get all fields for this pod
-            local metrics=$(redis_exec HGETALL "$key" 2>/dev/null || echo "")
+            local metrics=$(redis_exec HGETALL "$key" 2>/dev/null)
             if [[ -n "$metrics" ]]; then
-                echo "$metrics" | while read -r field value; do
+                # Parse field-value pairs
+                local items=()
+                while IFS= read -r line; do
+                    if [[ -n "$line" ]]; then
+                        items+=("$line")
+                    fi
+                done <<< "$metrics"
+                
+                # Process pairs (field, value)
+                for ((i=0; i<${#items[@]}; i+=2)); do
+                    local field="${items[i]}"
+                    local value="${items[i+1]}"
                     if [[ -n "$field" && -n "$value" ]]; then
                         printf "   %-20s: %s\n" "$field" "$value"
                     fi
