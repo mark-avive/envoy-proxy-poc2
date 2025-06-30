@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: default
+  labels:
+    app: redis-connection-tracker
+    component: config
+data:
+  redis.conf: |
+    # Fast startup - no disk persistence for connection tracking
+    save ""
+    
+    # Memory management
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+    
+    # Network settings
+    timeout 0
+    tcp-keepalive 60
+    
+    # Performance optimization
+    databases 1
+    
+    # Logging
+    loglevel notice
+    
+    # Security - bind to all interfaces within cluster
+    bind 0.0.0.0
+    protected-mode no
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-connection-tracker
+  namespace: default
+  labels:
+    app: redis-connection-tracker
+    component: cache
+    version: v1.0.0
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-connection-tracker
+  template:
+    metadata:
+      labels:
+        app: redis-connection-tracker
+        component: cache
+        version: v1.0.0
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+          name: redis
+          protocol: TCP
+        volumeMounts:
+        - name: redis-config
+          mountPath: /usr/local/etc/redis
+          readOnly: true
+        command:
+        - redis-server
+        - /usr/local/etc/redis/redis.conf
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        livenessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          runAsGroup: 999
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-connection-tracker
+  namespace: default
+  labels:
+    app: redis-connection-tracker
+    component: cache
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6379
+    targetPort: 6379
+    protocol: TCP
+    name: redis
+  selector:
+    app: redis-connection-tracker
+
+---
+# Optional: Redis monitoring service for metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-connection-tracker-headless
+  namespace: default
+  labels:
+    app: redis-connection-tracker
+    component: cache
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+  - port: 6379
+    targetPort: 6379
+    protocol: TCP
+    name: redis
+  selector:
+    app: redis-connection-tracker

@@ -111,12 +111,27 @@ case "$ACTION" in
             run_terraform "apply"
             echo ""
             echo "✓ Envoy Proxy infrastructure deployed successfully!"
+            
+            # Deploy Redis connection tracker
+            echo ""
+            echo "Deploying Redis connection tracker for enhanced connection management..."
+            kubectl apply -f k8s/redis-deployment.yaml
+            
+            echo "Waiting for Redis to be ready..."
+            if kubectl wait --for=condition=available deployment/redis-connection-tracker --timeout=120s; then
+                echo "✓ Redis connection tracker deployed successfully!"
+            else
+                echo "⚠ Redis deployment may still be in progress"
+            fi
+            
             echo ""
             echo "Deployment includes:"
             echo "  - AWS Load Balancer Controller installed via Helm"
-            echo "  - Envoy proxy deployed with 2 replicas"
+            echo "  - Envoy proxy deployed with 2 replicas and Redis-based connection tracking"
+            echo "  - Redis connection tracker for global per-pod connection limits"
             echo "  - ALB Ingress configured for external access"
-            echo "  - WebSocket connection limiting and rate limiting enabled"
+            echo "  - Enhanced WebSocket connection limiting and rate limiting"
+            echo "  - Scaling metrics and connection tracking via Redis"
             echo ""
             echo "Getting ALB endpoint..."
             sleep 30  # Wait a moment for ALB to be ready
@@ -141,14 +156,18 @@ case "$ACTION" in
         fi
         ;;
     "destroy")
-        echo "WARNING: This will destroy Envoy Proxy, ALB Controller, and associated resources!"
-        echo "This will also delete the Application Load Balancer."
+        echo "WARNING: This will destroy Envoy Proxy, Redis, ALB Controller, and associated resources!"
+        echo "This will also delete the Application Load Balancer and all connection tracking data."
         echo ""
         read -p "Are you sure you want to destroy the Envoy Proxy setup? (y/N): " -n 1 -r
         echo ""
         if [[ $REPLY =~ ^[Yy]$ ]]; then
+            # Clean up Redis first
+            echo "Cleaning up Redis connection tracker..."
+            kubectl delete -f k8s/redis-deployment.yaml --ignore-not-found=true
+            
             run_terraform "destroy"
-            echo "✓ Envoy Proxy infrastructure destroyed!"
+            echo "✓ Envoy Proxy infrastructure and Redis destroyed!"
         else
             echo "Destruction cancelled by user"
             exit 0

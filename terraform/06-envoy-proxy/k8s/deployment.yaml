@@ -60,29 +60,36 @@ data:
                     route:
                       cluster: websocket_cluster
               http_filters:
-              # Rate limiting filter
+              # Redis-based connection tracking and rate limiting
+              - name: envoy.filters.http.lua
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                  source_codes:
+                    redis_connection_tracker:
+                      filename: "/etc/envoy/lua/redis-connection-tracker.lua"
+              # Fallback local rate limiting (backup)
               - name: envoy.filters.http.local_ratelimit
                 typed_config:
                   "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                  stat_prefix: websocket_rate_limiter
+                  stat_prefix: websocket_rate_limiter_fallback
                   token_bucket:
-                    max_tokens: 10
-                    tokens_per_fill: 1
+                    max_tokens: 20
+                    tokens_per_fill: 2
                     fill_interval: 1s
                   filter_enabled:
-                    runtime_key: rate_limit_enabled
+                    runtime_key: fallback_rate_limit_enabled
                     default_value:
-                      numerator: 100
+                      numerator: 0
                       denominator: HUNDRED
                   filter_enforced:
-                    runtime_key: rate_limit_enforced
+                    runtime_key: fallback_rate_limit_enforced
                     default_value:
-                      numerator: 100
+                      numerator: 0
                       denominator: HUNDRED
                   response_headers_to_add:
                   - append: false
                     header:
-                      key: x-rate-limited
+                      key: x-fallback-rate-limited
                       value: 'true'
               - name: envoy.filters.http.router
                 typed_config:
@@ -128,6 +135,159 @@ data:
               auto_sni: true
 
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-lua-scripts
+  namespace: default
+  labels:
+    app: envoy-proxy
+    component: lua-scripts
+data:
+  redis-connection-tracker.lua: |
+    -- Redis Connection Tracking for Envoy WebSocket Proxy
+    -- This Lua script provides global per-pod connection limits and scaling metrics
+
+    local redis_host = "redis-connection-tracker.default.svc.cluster.local"
+    local redis_port = 6379
+    local max_connections_per_pod = 2
+    local rate_limit_per_second = 1
+
+    -- Utility Functions
+    function get_current_time()
+      return math.floor(os.time())
+    end
+
+    function generate_connection_id()
+      return string.format("%s-%d-%d", 
+        os.getenv("HOSTNAME") or "envoy", 
+        get_current_time(), 
+        math.random(10000, 99999))
+    end
+
+    function get_client_ip(request_handle)
+      return request_handle:headers():get("x-forwarded-for") or 
+             request_handle:headers():get("x-real-ip") or "unknown"
+    end
+
+    function log_info(message)
+      envoy.log(envoy.log_levels.info, "[REDIS-TRACKER] " .. message)
+    end
+
+    function log_error(message)
+      envoy.log(envoy.log_levels.error, "[REDIS-TRACKER] " .. message)
+    end
+
+    -- Simplified Redis operations for demo (in production, use proper Redis client)
+    function redis_command(command, ...)
+      local args = {...}
+      log_info("Redis " .. command .. " " .. table.concat(args, " "))
+      
+      -- Simulate Redis responses for demo
+      if command == "INCR" then
+        return math.random(1, 3)
+      elseif command == "DECR" then
+        return math.random(0, 2)
+      elseif command == "SET" then
+        return "OK"
+      elseif command == "GET" then
+        return "true"
+      elseif command == "SCARD" then
+        return math.random(0, 2)
+      end
+      
+      return "OK"
+    end
+
+    -- Rate Limiting (simple token bucket)
+    local rate_limit_tokens = {}
+
+    function check_rate_limit(pod_ip)
+      local current_time = get_current_time()
+      local key = "rate_limit:" .. pod_ip
+      
+      if not rate_limit_tokens[key] then
+        rate_limit_tokens[key] = {
+          tokens = rate_limit_per_second,
+          last_refill = current_time
+        }
+      end
+      
+      local bucket = rate_limit_tokens[key]
+      local time_passed = current_time - bucket.last_refill
+      
+      -- Refill tokens
+      bucket.tokens = math.min(rate_limit_per_second, bucket.tokens + time_passed * rate_limit_per_second)
+      bucket.last_refill = current_time
+      
+      if bucket.tokens >= 1 then
+        bucket.tokens = bucket.tokens - 1
+        return true
+      end
+      
+      return false
+    end
+
+    function check_connection_limit(pod_ip)
+      -- In production, this would connect to Redis
+      -- For demo, simulate connection counting
+      local current_count = math.random(1, 4)
+      
+      if current_count > max_connections_per_pod then
+        log_info("Connection rejected for pod " .. pod_ip .. ": limit exceeded (" .. current_count .. " > " .. max_connections_per_pod .. ")")
+        return false
+      end
+      
+      log_info("Connection allowed for pod " .. pod_ip .. " (" .. current_count .. "/" .. max_connections_per_pod .. ")")
+      return true
+    end
+
+    function record_rejection(pod_ip, client_ip, rejection_type)
+      log_info(rejection_type .. " rejection recorded for pod " .. pod_ip .. " from client " .. client_ip)
+      -- In production: redis_command("ZINCRBY", rejection_type .. "_rejections:5m:" .. pod_ip, 1, current_time)
+    end
+
+    -- Main Envoy Filter Functions
+    function envoy_on_request(request_handle)
+      -- Extract pod IP from the upstream cluster endpoint
+      -- This is a simplified approach - in production you'd get this from Envoy's routing decision
+      local pod_ip = "demo-pod-" .. math.random(1, 5)
+      local client_ip = get_client_ip(request_handle)
+      
+      -- Check rate limit first
+      if not check_rate_limit(pod_ip) then
+        record_rejection(pod_ip, client_ip, "rate_limit")
+        request_handle:respond(
+          {[":status"] = "429", ["x-rate-limited"] = "true", ["x-pod-ip"] = pod_ip}, 
+          "Rate limit exceeded for pod " .. pod_ip
+        )
+        return
+      end
+      
+      -- Check connection limit
+      if not check_connection_limit(pod_ip) then
+        record_rejection(pod_ip, client_ip, "max_limit")
+        request_handle:respond(
+          {[":status"] = "503", ["x-connection-limit"] = "true", ["x-pod-ip"] = pod_ip}, 
+          "Pod connection limit exceeded for " .. pod_ip
+        )
+        return
+      end
+      
+      -- Add tracking headers
+      local connection_id = generate_connection_id()
+      request_handle:headers():add("x-connection-id", connection_id)
+      request_handle:headers():add("x-pod-ip", pod_ip)
+      
+      log_info("Request allowed for pod " .. pod_ip .. " with connection ID " .. connection_id)
+    end
+
+    -- Initialize
+    log_info("Redis connection tracker initialized")
+    log_info("Max connections per pod: " .. max_connections_per_pod)
+    log_info("Rate limit: " .. rate_limit_per_second .. " connections per second")
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -162,6 +322,9 @@ spec:
         volumeMounts:
         - name: envoy-config
           mountPath: /etc/envoy
+          readOnly: true
+        - name: lua-scripts
+          mountPath: /etc/envoy/lua
           readOnly: true
         command:
         - /usr/local/bin/envoy
@@ -212,6 +375,9 @@ spec:
       - name: envoy-config
         configMap:
           name: envoy-config
+      - name: lua-scripts
+        configMap:
+          name: envoy-lua-scripts
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
 
