@@ -93,6 +93,7 @@ data:
         connect_timeout: 30s
         type: STRICT_DNS
         lb_policy: ROUND_ROBIN
+        dns_lookup_family: V4_ONLY
         circuit_breakers:
           thresholds:
           - priority: DEFAULT
@@ -106,14 +107,7 @@ data:
           interval_jitter: 1s
           unhealthy_threshold: 3
           healthy_threshold: 2
-          http_health_check:
-            path: "/health"
-            host: "backend"
-            request_headers_to_add:
-            - header:
-                key: "x-envoy-health-check"
-                value: "true"
-              append: false
+          tcp_health_check: {}
         load_assignment:
           cluster_name: websocket_cluster
           endpoints:
@@ -122,7 +116,7 @@ data:
                 address:
                   socket_address:
                     address: envoy-poc-app-server-service.default.svc.cluster.local
-                    port_value: 80
+                    port_value: 8080
         # Connection pool settings for WebSocket connections
         typed_extension_protocol_options:
           envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
