@@ -41,82 +41,50 @@ function get_redis_connection()
     return red, nil
 end
 
--- Atomic check-and-increment for pod connections (CRITICAL: Prevents race conditions)
-function redis_atomic_check_and_increment(handle, pod_id, max_connections)
+-- Atomic increment for pod connections
+function redis_increment_pod_connections(handle, pod_id)
+    local red, err = get_redis_connection()
+    if not red then
+        handle:logErr("[REDIS-TRACKER] " .. err)
+        return nil, err
+    end
+    
+    local key = string.format(REDIS_KEYS.POD_CONNECTIONS, pod_id)
+    local new_count, err = red:incr(key)
+    
+    if not new_count then
+        handle:logErr("[REDIS-TRACKER] Redis incr failed: " .. tostring(err))
+        red:close()
+        return nil, err
+    end
+    
+    -- Set expiration for cleanup (24 hours)
+    red:expire(key, 86400)
+    red:close()
+    
+    return new_count, nil
+end
+
+-- Check pod connection limit with atomic Redis operation
+function redis_check_pod_limit(handle, pod_id, max_connections)
     local red, err = get_redis_connection()
     if not red then
         handle:logErr("[REDIS-TRACKER] Redis unavailable: " .. err)
-        return false, 0, "Redis unavailable"
+        return false, 0  -- Fail open if Redis unavailable
     end
     
     local key = string.format(REDIS_KEYS.POD_CONNECTIONS, pod_id)
+    local current_count, err = red:get(key)
     
-    -- Redis Lua script for atomic check-and-increment
-    local lua_script = [[
-        local key = KEYS[1]
-        local max_connections = tonumber(ARGV[1])
-        local current = redis.call('GET', key)
-        if current == false then
-            current = 0
-        else
-            current = tonumber(current)
-        end
-        
-        if current >= max_connections then
-            return {false, current, "limit_exceeded"}
-        else
-            local new_count = redis.call('INCR', key)
-            redis.call('EXPIRE', key, 86400)  -- 24 hour expiration
-            return {true, new_count, "success"}
-        end
-    ]]
-    
-    local result, err = red:eval(lua_script, 1, key, max_connections)
     red:close()
     
-    if not result then
-        handle:logErr("[REDIS-TRACKER] Redis eval failed: " .. tostring(err))
-        return false, 0, "Redis eval failed"
-    end
-    
-    local allowed = result[1]
-    local count = result[2]
-    local status = result[3]
-    
-    return allowed, count, status
-end
-
--- Atomic decrement for connection cleanup
-function redis_atomic_decrement(handle, pod_id)
-    local red, err = get_redis_connection()
-    if not red then
-        handle:logErr("[REDIS-TRACKER] Redis unavailable for decrement: " .. err)
-        return false
-    end
-    
-    local key = string.format(REDIS_KEYS.POD_CONNECTIONS, pod_id)
-    
-    -- Redis Lua script for atomic decrement (don't go below 0)
-    local lua_script = [[
-        local key = KEYS[1]
-        local current = redis.call('GET', key)
-        if current == false or tonumber(current) <= 0 then
-            return 0
-        else
-            return redis.call('DECR', key)
-        end
-    ]]
-    
-    local result, err = red:eval(lua_script, 1, key)
-    red:close()
-    
-    if result then
-        handle:logInfo(string.format("[REDIS-TRACKER] Decremented connections for pod %s to %d", pod_id, result))
-        return true
+    if not current_count then
+        current_count = 0
     else
-        handle:logErr("[REDIS-TRACKER] Failed to decrement pod connections: " .. tostring(err))
-        return false
+        current_count = tonumber(current_count) or 0
     end
+    
+    return current_count >= max_connections, current_count
 end
 
 -- Distributed rate limiting with Redis
@@ -208,13 +176,13 @@ function envoy_on_request(request_handle)
     -- Get target pod for this request
     local pod_id = get_pod_id_from_upstream(request_handle)
     
-    -- ATOMIC check-and-increment to prevent race conditions
-    local allowed, count, status = redis_atomic_check_and_increment(request_handle, pod_id, CONFIG.MAX_CONNECTIONS_PER_POD)
+    -- Check global per-pod connection limit
+    local limit_exceeded, current_count = redis_check_pod_limit(request_handle, pod_id, CONFIG.MAX_CONNECTIONS_PER_POD)
     
-    if not allowed then
+    if limit_exceeded then
         request_handle:logWarn(string.format(
-            "[REDIS-TRACKER] Pod %s connection rejected: %d/%d (%s)",
-            pod_id, count, CONFIG.MAX_CONNECTIONS_PER_POD, status
+            "[REDIS-TRACKER] Pod %s connection limit exceeded: %d/%d (global count)",
+            pod_id, current_count, CONFIG.MAX_CONNECTIONS_PER_POD
         ))
         increment_counter(request_handle, REDIS_KEYS.REJECTED_CONNECTIONS)
         request_handle:respond(
@@ -225,65 +193,28 @@ function envoy_on_request(request_handle)
     end
     
     request_handle:logInfo(string.format(
-        "[REDIS-TRACKER] WebSocket upgrade ATOMICALLY reserved for pod %s (%d/%d connections)",
-        pod_id, count, CONFIG.MAX_CONNECTIONS_PER_POD
+        "[REDIS-TRACKER] WebSocket upgrade allowed for pod %s (%d/%d connections)",
+        pod_id, current_count, CONFIG.MAX_CONNECTIONS_PER_POD
     ))
-    
-    -- Store pod_id for cleanup on connection termination
-    request_handle:headers():add("x-reserved-pod-id", pod_id)
 end
 
--- Enhanced response handler with cleanup logic
+-- Enhanced response handler
 function envoy_on_response(request_handle)
     local response_headers = request_handle:headers()
     local status = response_headers:get(":status")
-    local pod_id = request_handle:headers():get("x-reserved-pod-id")
-    
-    if not pod_id then
-        pod_id = get_pod_id_from_upstream(request_handle)
-    end
     
     if status == "101" then  -- WebSocket upgrade successful
+        local pod_id = get_pod_id_from_upstream(request_handle)
+        
         if pod_id then
-            -- Update global connection counter (the pod connection was already incremented atomically)
+            -- Increment global counters atomically
+            local new_pod_count = redis_increment_pod_connections(request_handle, pod_id)
             increment_counter(request_handle, REDIS_KEYS.GLOBAL_CONNECTIONS)
             
             request_handle:logInfo(string.format(
-                "[REDIS-TRACKER] WebSocket established to pod %s (connection already counted atomically)",
-                pod_id
+                "[REDIS-TRACKER] WebSocket established to pod %s. Global pod connections: %d/%d",
+                pod_id, new_pod_count or 0, CONFIG.MAX_CONNECTIONS_PER_POD
             ))
-        end
-    else
-        -- WebSocket upgrade failed - need to decrement the reserved connection
-        if pod_id and status and status ~= "101" then
-            request_handle:logWarn(string.format(
-                "[REDIS-TRACKER] WebSocket upgrade failed (status %s) - releasing reserved connection for pod %s",
-                status, pod_id
-            ))
-            redis_atomic_decrement(request_handle, pod_id)
-        end
-    end
-end
-
--- Connection termination handler (for cleanup when WebSocket closes)
-function envoy_on_stream_done(request_handle)
-    local pod_id = request_handle:headers():get("x-reserved-pod-id")
-    if not pod_id then
-        pod_id = get_pod_id_from_upstream(request_handle)
-    end
-    
-    if pod_id then
-        request_handle:logInfo(string.format(
-            "[REDIS-TRACKER] WebSocket connection closed - decrementing count for pod %s",
-            pod_id
-        ))
-        redis_atomic_decrement(request_handle, pod_id)
-        
-        -- Decrement global counter
-        local red, err = get_redis_connection()
-        if red then
-            red:decr(REDIS_KEYS.GLOBAL_CONNECTIONS)
-            red:close()
         end
     end
 end

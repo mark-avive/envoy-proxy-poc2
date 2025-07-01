@@ -3,16 +3,20 @@ resource "null_resource" "deploy_envoy" {
   depends_on = [
     helm_release.aws_load_balancer_controller,
     data.terraform_remote_state.server_app,
-    local_file.envoy_config
+    local_file.envoy_config,
+    local_file.envoy_deployment
   ]
 
   triggers = {
     envoy_config_hash = local_file.envoy_config.content_md5
+    envoy_deployment_hash = local_file.envoy_deployment.content_md5
     alb_controller_deployed = helm_release.aws_load_balancer_controller.status
     locals_hash = sha256(jsonencode({
       max_connections = local.max_connections
       max_tokens = local.max_tokens
       tokens_per_fill = local.tokens_per_fill
+      envoy_image = local.envoy_image
+      redis_service_name = local.redis_service_name
     }))
   }
 

@@ -33,6 +33,11 @@ static_resources:
             virtual_hosts:
             - name: websocket_service
               domains: ["*"]
+              request_headers_to_add:
+              - header:
+                  key: "x-upstream-host"
+                  value: "%UPSTREAM_HOST%"
+                append: false
               routes:
               - match:
                   prefix: "/"
@@ -45,20 +50,10 @@ static_resources:
                   timeout: 0s
                   upgrade_configs:
                   - upgrade_type: "websocket"
-                  request_headers_to_add:
-                  - header:
-                      key: "x-upstream-host"
-                      value: "%UPSTREAM_HOST%"
-                    append: false
               - match:
                   prefix: "/"
                 route:
                   cluster: websocket_cluster
-                  request_headers_to_add:
-                  - header:
-                      key: "x-upstream-host"
-                      value: "%UPSTREAM_HOST%"
-                    append: false
           http_filters:
           # Lua script for Redis connection tracking and enforcement (ENFORCES LIMITS)
           - name: envoy.filters.http.lua

@@ -1,0 +1,197 @@
+-- Updated Lua script with Redis integration
+local redis = require("redis")
+
+-- Redis connection configuration
+local REDIS_CONFIG = {
+    HOST = os.getenv("REDIS_HOST") or "redis-service.default.svc.cluster.local",
+    PORT = tonumber(os.getenv("REDIS_PORT")) or 6379,
+    TIMEOUT = 1000,  -- 1 second timeout
+    POOL_SIZE = 10
+}
+
+-- Redis key patterns
+local REDIS_KEYS = {
+    POD_CONNECTIONS = "ws:pod_conn:%s",           -- ws:pod_conn:pod-ip
+    GLOBAL_CONNECTIONS = "ws:global_conn",        -- Total active connections
+    RATE_LIMIT_WINDOW = "ws:rate_limit:%d",       -- ws:rate_limit:timestamp
+    REJECTED_CONNECTIONS = "ws:rejected",         -- Total rejected
+    PROXY_HEARTBEAT = "ws:proxy:%s:heartbeat"     -- Proxy health tracking
+}
+
+-- Get Redis connection
+function get_redis_connection()
+    local red = redis:new()
+    red:set_timeout(REDIS_CONFIG.TIMEOUT)
+    
+    local ok, err = red:connect(REDIS_CONFIG.HOST, REDIS_CONFIG.PORT)
+    if not ok then
+        request_handle:logErr("Failed to connect to Redis: " .. tostring(err))
+        return nil
+    end
+    
+    return red
+end
+
+-- Atomic increment with Redis
+function redis_increment_pod_connections(pod_id)
+    local red = get_redis_connection()
+    if not red then
+        return nil, "Redis connection failed"
+    end
+    
+    local key = string.format(REDIS_KEYS.POD_CONNECTIONS, pod_id)
+    local new_count, err = red:incr(key)
+    
+    if not new_count then
+        request_handle:logErr("Redis incr failed: " .. tostring(err))
+        red:close()
+        return nil, err
+    end
+    
+    -- Set expiration for cleanup (24 hours)
+    red:expire(key, 86400)
+    red:close()
+    
+    return new_count, nil
+end
+
+-- Check pod connection limit with Redis
+function redis_check_pod_limit(pod_id, max_connections)
+    local red = get_redis_connection()
+    if not red then
+        -- Fallback to local check if Redis unavailable
+        return false, "Redis unavailable"
+    end
+    
+    local key = string.format(REDIS_KEYS.POD_CONNECTIONS, pod_id)
+    local current_count, err = red:get(key)
+    
+    red:close()
+    
+    if not current_count then
+        current_count = 0
+    else
+        current_count = tonumber(current_count) or 0
+    end
+    
+    return current_count >= max_connections, current_count
+end
+
+-- Distributed rate limiting with Redis
+function redis_check_rate_limit(requests_per_minute)
+    local red = get_redis_connection()
+    if not red then
+        return false  -- Allow if Redis unavailable
+    end
+    
+    local current_minute = math.floor(os.time() / 60)
+    local key = string.format(REDIS_KEYS.RATE_LIMIT_WINDOW, current_minute)
+    
+    -- Use Redis pipeline for atomic operations
+    red:init_pipeline()
+    red:incr(key)
+    red:expire(key, 60)  -- Expire after 60 seconds
+    local results, err = red:commit_pipeline()
+    
+    red:close()
+    
+    if not results then
+        request_handle:logErr("Redis rate limit check failed: " .. tostring(err))
+        return false
+    end
+    
+    local current_count = results[1]
+    return current_count > requests_per_minute
+end
+
+-- Enhanced request processing with Redis
+function envoy_on_request(request_handle)
+    local headers = request_handle:headers()
+    
+    -- Handle metrics endpoint - aggregate from Redis
+    if headers:get(":path") == "/websocket/metrics" then
+        local red = get_redis_connection()
+        if red then
+            local global_active = red:get(REDIS_KEYS.GLOBAL_CONNECTIONS) or 0
+            local global_rejected = red:get(REDIS_KEYS.REJECTED_CONNECTIONS) or 0
+            red:close()
+            
+            local metrics = string.format([[
+# HELP websocket_connections_active_total Total active WebSocket connections (all proxies)
+# TYPE websocket_connections_active_total counter
+websocket_connections_active_total %s
+
+# HELP websocket_connections_rejected_total Total rejected WebSocket connections (all proxies)
+# TYPE websocket_connections_rejected_total counter
+websocket_connections_rejected_total %s
+
+# HELP websocket_proxy_instance Instance identifier
+# TYPE websocket_proxy_instance gauge
+websocket_proxy_instance{proxy_id="%s"} 1
+]], global_active, global_rejected, os.getenv("HOSTNAME") or "unknown")
+            
+            request_handle:respond(
+                {[":status"] = "200", ["content-type"] = "text/plain"},
+                metrics
+            )
+        else
+            request_handle:respond(
+                {[":status"] = "503", ["content-type"] = "text/plain"},
+                "Metrics unavailable - Redis connection failed"
+            )
+        end
+        return
+    end
+    
+    -- Only process WebSocket upgrades
+    if not is_websocket_upgrade(headers) then
+        return
+    end
+    
+    -- Global rate limiting check
+    if redis_check_rate_limit(CONFIG.RATE_LIMIT_REQUESTS) then
+        request_handle:logWarn("Global rate limit exceeded")
+        redis_increment_counter(REDIS_KEYS.REJECTED_CONNECTIONS)
+        request_handle:respond(
+            {[":status"] = "429", ["content-type"] = "text/plain"},
+            "Rate limit exceeded globally"
+        )
+        return
+    end
+    
+    request_handle:logInfo("WebSocket upgrade request passed rate limiting")
+end
+
+-- Enhanced response processing with Redis
+function envoy_on_response(request_handle)
+    local response_headers = request_handle:headers()
+    local status = response_headers:get(":status")
+    
+    if status == "101" then  -- WebSocket upgrade successful
+        local pod_id = get_pod_id_from_upstream()
+        
+        if pod_id then
+            -- Check global pod connection limit
+            local limit_exceeded, current_count = redis_check_pod_limit(pod_id, CONFIG.MAX_CONNECTIONS_PER_POD)
+            
+            if limit_exceeded then
+                request_handle:logWarn(string.format(
+                    "Pod %s connection limit exceeded: %d/%d (global count)",
+                    pod_id, current_count, CONFIG.MAX_CONNECTIONS_PER_POD
+                ))
+                redis_increment_counter(REDIS_KEYS.REJECTED_CONNECTIONS)
+                -- Note: Connection already established, would need connection draining
+                return
+            end
+            
+            -- Increment global counters
+            local new_pod_count = redis_increment_pod_connections(pod_id)
+            redis_increment_counter(REDIS_KEYS.GLOBAL_CONNECTIONS)
+            
+            request_handle:logInfo(string.format(
+                "WebSocket established to pod %s. Global pod connections: %d/%d",
+                pod_id, new_pod_count, CONFIG.MAX_CONNECTIONS_PER_POD
+            ))
+        end
+    end
+end

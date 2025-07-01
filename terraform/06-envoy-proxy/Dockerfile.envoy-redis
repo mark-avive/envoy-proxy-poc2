@@ -1,0 +1,45 @@
+# Custom Envoy with lua-resty-redis for direct Redis connections
+# Base image can be overridden via build arg
+ARG BASE_IMAGE=envoyproxy/envoy:v1.29-latest
+FROM ${BASE_IMAGE}
+
+# Switch to root to install packages
+USER root
+
+# Install required packages for lua-resty-redis
+RUN apt-get update && \
+    apt-get install -y \
+    lua5.1 \
+    luarocks \
+    libssl-dev \
+    libpcre3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install lua-resty-redis library
+RUN luarocks install lua-resty-redis
+
+# Install additional Lua libraries for better Redis support
+RUN luarocks install luasocket
+RUN luarocks install lua-cjson
+
+# Create directories for Lua libraries to be accessible by Envoy
+RUN mkdir -p /usr/local/share/lua/5.1
+RUN mkdir -p /usr/local/lib/lua/5.1
+
+# Ensure Envoy can find the Lua libraries
+ENV LUA_PATH="/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/init.lua;;"
+ENV LUA_CPATH="/usr/local/lib/lua/5.1/?.so;;"
+
+# Create a script to set up the Lua environment for Envoy
+RUN echo '#!/bin/bash\n\
+export LUA_PATH="/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/init.lua;;"\n\
+export LUA_CPATH="/usr/local/lib/lua/5.1/?.so;;"\n\
+exec "$@"' > /usr/local/bin/envoy-wrapper && \
+    chmod +x /usr/local/bin/envoy-wrapper
+
+# Switch back to envoy user
+USER envoy
+
+# Use the wrapper script as entrypoint
+ENTRYPOINT ["/usr/local/bin/envoy-wrapper"]
+CMD ["/usr/local/bin/envoy", "--config-path", "/etc/envoy/envoy.yaml"]

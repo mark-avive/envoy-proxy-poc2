@@ -1,0 +1,372 @@
+-- ==============================================================================
+--                    ENVOY LUA FILTER FOR WEBSOCKET CONNECTION MANAGEMENT
+-- ==============================================================================
+
+local json = require("json")
+local string = require("string")
+local table = require("table")
+
+-- Configuration constants
+local CONFIG = {
+    MAX_CONNECTIONS_PER_POD = 100,      -- Maximum WebSocket connections per pod
+    RATE_LIMIT_WINDOW = 60,             -- Rate limit window in seconds
+    RATE_LIMIT_REQUESTS = 50,           -- Max new connections per window
+    METRICS_UPDATE_INTERVAL = 10,       -- Metrics update frequency
+    CONNECTION_TIMEOUT = 300,           -- Connection timeout in seconds
+}
+
+-- Shared memory keys for cross-worker communication
+local SHARED_MEMORY_KEYS = {
+    POD_CONNECTIONS = "pod_connections:",
+    RATE_LIMIT_WINDOW = "rate_limit_window:",
+    TOTAL_ACTIVE_CONNECTIONS = "total_active_connections",
+    TOTAL_REJECTED_CONNECTIONS = "total_rejected_connections",
+    RATE_LIMITED_CONNECTIONS = "rate_limited_connections",
+}
+
+-- ==============================================================================
+--                                HELPER FUNCTIONS
+-- ==============================================================================
+
+-- Get current timestamp
+function get_current_time()
+    return os.time()
+end
+
+-- Get pod identifier from upstream host
+function extract_pod_id(upstream_host)
+    if not upstream_host then
+        return nil
+    end
+    
+    -- Extract pod IP or hostname
+    -- Format: pod-ip:port or pod-hostname:port
+    local pod_id = string.match(upstream_host, "([^:]+)")
+    return pod_id
+end
+
+-- Get or initialize pod connection count
+function get_pod_connection_count(pod_id)
+    local key = SHARED_MEMORY_KEYS.POD_CONNECTIONS .. pod_id
+    local count = request_handle:sharedData():get(key)
+    return tonumber(count) or 0
+end
+
+-- Set pod connection count
+function set_pod_connection_count(pod_id, count)
+    local key = SHARED_MEMORY_KEYS.POD_CONNECTIONS .. pod_id
+    request_handle:sharedData():set(key, tostring(count))
+end
+
+-- Increment pod connection count atomically
+function increment_pod_connections(pod_id)
+    local current_count = get_pod_connection_count(pod_id)
+    local new_count = current_count + 1
+    set_pod_connection_count(pod_id, new_count)
+    return new_count
+end
+
+-- Decrement pod connection count atomically
+function decrement_pod_connections(pod_id)
+    local current_count = get_pod_connection_count(pod_id)
+    local new_count = math.max(0, current_count - 1)
+    set_pod_connection_count(pod_id, new_count)
+    return new_count
+end
+
+-- Get or initialize global counter
+function get_global_counter(counter_name)
+    local count = request_handle:sharedData():get(counter_name)
+    return tonumber(count) or 0
+end
+
+-- Increment global counter
+function increment_global_counter(counter_name)
+    local current = get_global_counter(counter_name)
+    request_handle:sharedData():set(counter_name, tostring(current + 1))
+    return current + 1
+end
+
+-- ==============================================================================
+--                              RATE LIMITING LOGIC
+-- ==============================================================================
+
+-- Check if rate limit is exceeded
+function is_rate_limited()
+    local current_time = get_current_time()
+    local window_start_key = SHARED_MEMORY_KEYS.RATE_LIMIT_WINDOW .. "start"
+    local window_count_key = SHARED_MEMORY_KEYS.RATE_LIMIT_WINDOW .. "count"
+    
+    -- Get current rate limit window data
+    local window_start = tonumber(request_handle:sharedData():get(window_start_key)) or 0
+    local window_count = tonumber(request_handle:sharedData():get(window_count_key)) or 0
+    
+    -- Check if we need to reset the window
+    if current_time - window_start >= CONFIG.RATE_LIMIT_WINDOW then
+        window_start = current_time
+        window_count = 0
+        request_handle:sharedData():set(window_start_key, tostring(window_start))
+    end
+    
+    -- Check if rate limit exceeded
+    if window_count >= CONFIG.RATE_LIMIT_REQUESTS then
+        increment_global_counter(SHARED_MEMORY_KEYS.RATE_LIMITED_CONNECTIONS)
+        return true
+    end
+    
+    -- Increment window count
+    window_count = window_count + 1
+    request_handle:sharedData():set(window_count_key, tostring(window_count))
+    
+    return false
+end
+
+-- ==============================================================================
+--                          CONNECTION LIMIT LOGIC
+-- ==============================================================================
+
+-- Check if pod connection limit is exceeded
+function is_pod_limit_exceeded(pod_id)
+    local current_connections = get_pod_connection_count(pod_id)
+    return current_connections >= CONFIG.MAX_CONNECTIONS_PER_POD
+end
+
+-- ==============================================================================
+--                              WEBSOCKET DETECTION
+-- ==============================================================================
+
+-- Check if request is a WebSocket upgrade
+function is_websocket_upgrade(headers)
+    local connection = headers:get("connection")
+    local upgrade = headers:get("upgrade")
+    
+    if connection and upgrade then
+        connection = string.lower(connection)
+        upgrade = string.lower(upgrade)
+        
+        return string.find(connection, "upgrade") and upgrade == "websocket"
+    end
+    
+    return false
+end
+
+-- ==============================================================================
+--                                METRICS FUNCTIONS
+-- ==============================================================================
+
+-- Get all pod connection counts for metrics
+function get_all_pod_metrics()
+    -- Note: In production, you'd want to maintain a list of active pods
+    -- This is a simplified version that would need enhancement
+    local pod_metrics = {}
+    
+    -- You would iterate through known pods here
+    -- This requires maintaining a registry of active pods
+    
+    return pod_metrics
+end
+
+-- Generate metrics in Prometheus format
+function generate_prometheus_metrics()
+    local metrics = {}
+    
+    -- Total active connections
+    local total_active = get_global_counter(SHARED_MEMORY_KEYS.TOTAL_ACTIVE_CONNECTIONS)
+    table.insert(metrics, string.format("websocket_connections_active_total %d", total_active))
+    
+    -- Total rejected connections
+    local total_rejected = get_global_counter(SHARED_MEMORY_KEYS.TOTAL_REJECTED_CONNECTIONS)
+    table.insert(metrics, string.format("websocket_connections_rejected_total %d", total_rejected))
+    
+    -- Rate limited connections
+    local rate_limited = get_global_counter(SHARED_MEMORY_KEYS.RATE_LIMITED_CONNECTIONS)
+    table.insert(metrics, string.format("websocket_connection_rate_limited_total %d", rate_limited))
+    
+    -- Per-pod metrics would go here
+    -- This requires maintaining a pod registry
+    
+    return table.concat(metrics, "\n")
+end
+
+-- ==============================================================================
+--                              MAIN ENVOY FUNCTIONS
+-- ==============================================================================
+
+-- Called when request headers are received
+function envoy_on_request(request_handle)
+    local headers = request_handle:headers()
+    
+    -- Check if this is a WebSocket upgrade request
+    if not is_websocket_upgrade(headers) then
+        return
+    end
+    
+    request_handle:logInfo("Processing WebSocket upgrade request")
+    
+    -- Apply rate limiting
+    if is_rate_limited() then
+        request_handle:logWarn("WebSocket connection rate limited")
+        request_handle:respond(
+            {[":status"] = "429", ["content-type"] = "text/plain"},
+            "Rate limit exceeded. Too many connection requests."
+        )
+        return
+    end
+    
+    -- Get the target pod (this requires looking ahead to upstream selection)
+    -- In practice, you might need to defer this check to envoy_on_response
+    local upstream_host = request_handle:streamInfo():upstreamHost()
+    local pod_id = extract_pod_id(upstream_host)
+    
+    if pod_id then
+        -- Check pod connection limits
+        if is_pod_limit_exceeded(pod_id) then
+            request_handle:logWarn(string.format("Pod %s connection limit exceeded", pod_id))
+            increment_global_counter(SHARED_MEMORY_KEYS.TOTAL_REJECTED_CONNECTIONS)
+            request_handle:respond(
+                {[":status"] = "503", ["content-type"] = "text/plain"},
+                "Service unavailable. Pod connection limit reached."
+            )
+            return
+        end
+        
+        -- Store pod_id in request metadata for later use
+        request_handle:streamInfo():setRequestProperty("websocket_pod_id", pod_id)
+    end
+end
+
+-- Called when response headers are received from upstream
+function envoy_on_response(request_handle)
+    local response_headers = request_handle:headers()
+    local status = response_headers:get(":status")
+    
+    -- Check if WebSocket upgrade was successful
+    if status == "101" then
+        local pod_id = request_handle:streamInfo():getRequestProperty("websocket_pod_id")
+        
+        if pod_id then
+            -- Increment connection counters
+            local new_count = increment_pod_connections(pod_id)
+            increment_global_counter(SHARED_MEMORY_KEYS.TOTAL_ACTIVE_CONNECTIONS)
+            
+            request_handle:logInfo(string.format(
+                "WebSocket connection established to pod %s. Pod connections: %d", 
+                pod_id, new_count
+            ))
+            
+            -- Set up connection cleanup on disconnect
+            -- Note: Envoy Lua doesn't have direct connection close callbacks
+            -- You might need to implement periodic cleanup or use other mechanisms
+        end
+    end
+end
+
+-- ==============================================================================
+--                              METRICS ENDPOINT
+-- ==============================================================================
+
+-- Handle metrics requests (if configured as a separate listener)
+function handle_metrics_request(request_handle)
+    local path = request_handle:headers():get(":path")
+    
+    if path == "/websocket/metrics" then
+        local metrics = generate_prometheus_metrics()
+        request_handle:respond(
+            {[":status"] = "200", ["content-type"] = "text/plain"},
+            metrics
+        )
+        return
+    elseif path == "/websocket/health" then
+        request_handle:respond(
+            {[":status"] = "200", ["content-type"] = "text/plain"},
+            "OK"
+        )
+        return
+    end
+end
+
+-- ==============================================================================
+--                              CONFIGURATION UPDATES
+-- ==============================================================================
+
+-- Update configuration dynamically (called via admin interface)
+function update_config(new_config)
+    if new_config.max_connections_per_pod then
+        CONFIG.MAX_CONNECTIONS_PER_POD = new_config.max_connections_per_pod
+    end
+    
+    if new_config.rate_limit_requests then
+        CONFIG.RATE_LIMIT_REQUESTS = new_config.rate_limit_requests
+    end
+    
+    if new_config.rate_limit_window then
+        CONFIG.RATE_LIMIT_WINDOW = new_config.rate_limit_window
+    end
+    
+    request_handle:logInfo("WebSocket proxy configuration updated")
+end
+
+-- ==============================================================================
+--                              CLEANUP FUNCTIONS
+-- ==============================================================================
+
+-- Periodic cleanup function (would be called by a timer or external process)
+function cleanup_stale_connections()
+    -- In a production environment, you'd implement:
+    -- 1. Connection timeout tracking
+    -- 2. Health checks for pods
+    -- 3. Cleanup of stale connection counts
+    -- 4. Pod registry maintenance
+    
+    local current_time = get_current_time()
+    -- Implementation would go here
+end
+
+-- ==============================================================================
+--                              LOGGING AND DEBUGGING
+-- ==============================================================================
+
+-- Debug function to log current state
+function log_current_state(request_handle)
+    local total_active = get_global_counter(SHARED_MEMORY_KEYS.TOTAL_ACTIVE_CONNECTIONS)
+    local total_rejected = get_global_counter(SHARED_MEMORY_KEYS.TOTAL_REJECTED_CONNECTIONS)
+    local rate_limited = get_global_counter(SHARED_MEMORY_KEYS.RATE_LIMITED_CONNECTIONS)
+    
+    request_handle:logInfo(string.format(
+        "WebSocket State - Active: %d, Rejected: %d, Rate Limited: %d",
+        total_active, total_rejected, rate_limited
+    ))
+end
+
+-- ==============================================================================
+--                              ENHANCED FEATURES
+-- ==============================================================================
+
+-- Pod health checking
+function is_pod_healthy(pod_id)
+    -- Implement health check logic
+    -- Could check last activity, health endpoint, etc.
+    return true
+end
+
+-- Connection draining for pod shutdown
+function drain_pod_connections(pod_id)
+    -- Implement graceful connection draining
+    -- When a pod is being terminated
+    local current_count = get_pod_connection_count(pod_id)
+    request_handle:logInfo(string.format("Draining %d connections from pod %s", current_count, pod_id))
+    
+    -- Implementation would involve:
+    -- 1. Marking pod as draining
+    -- 2. Rejecting new connections
+    -- 3. Optionally closing existing connections gracefully
+end
+
+-- Circuit breaker logic
+function is_circuit_breaker_open(pod_id)
+    -- Implement circuit breaker pattern
+    -- Based on error rates, response times, etc.
+    return false
+end
+
+-- ==============================================================================

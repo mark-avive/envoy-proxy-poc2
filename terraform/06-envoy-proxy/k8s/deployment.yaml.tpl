@@ -1,152 +1,15 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: envoy-config
-  namespace: ${namespace}
-  labels:
-    app: envoy-proxy
-    component: config
-data:
-  envoy.yaml: |
-$${indent(4, file("${path.module}/k8s/envoy-config.yaml"))}
----
-    admin:
-      address:
-        socket_address:
-          protocol: TCP
-          address: 0.0.0.0
-          port_value: 9901
-
-    static_resources:
-      listeners:
-      - name: websocket_listener
-        address:
-          socket_address:
-            protocol: TCP
-            address: 0.0.0.0
-            port_value: 8080
-        filter_chains:
-        - filters:
-          - name: envoy.filters.network.http_connection_manager
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-              scheme_header_transformation:
-                scheme_to_overwrite: http
-              stat_prefix: websocket_proxy
-              access_log:
-              - name: envoy.access_loggers.stdout
-                typed_config:
-                  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
-                  log_format:
-                    text_format: |
-                      [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%" "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
-              route_config:
-                name: local_route
-                virtual_hosts:
-                - name: websocket_service
-                  domains: ["*"]
-                  routes:
-                  - match:
-                      prefix: "/"
-                      headers:
-                      - name: "upgrade"
-                        string_match:
-                          exact: "websocket"
-                    route:
-                      cluster: websocket_cluster
-                      timeout: 0s
-                      upgrade_configs:
-                      - upgrade_type: "websocket"
-                  - match:
-                      prefix: "/"
-                    route:
-                      cluster: websocket_cluster
-              http_filters:
-              # Rate limiting filter - DISABLED for testing
-              - name: envoy.filters.http.local_ratelimit
-                typed_config:
-                  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                  stat_prefix: websocket_rate_limiter
-                  token_bucket:
-                    max_tokens: 1000
-                    tokens_per_fill: 100
-                    fill_interval: 1s
-                  filter_enabled:
-                    runtime_key: rate_limit_enabled
-                    default_value:
-                      numerator: 0
-                      denominator: HUNDRED
-                  filter_enforced:
-                    runtime_key: rate_limit_enforced
-                    default_value:
-                      numerator: 0
-                      denominator: HUNDRED
-                  response_headers_to_add:
-                  - append: false
-                    header:
-                      key: x-rate-limited
-                      value: 'true'
-              - name: envoy.filters.http.router
-                typed_config:
-                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-
-      clusters:
-      - name: websocket_cluster
-        connect_timeout: 30s
-        type: STRICT_DNS
-        lb_policy: ROUND_ROBIN
-        circuit_breakers:
-          thresholds:
-          - priority: DEFAULT
-            max_connections: 100        # Increased for testing
-            max_pending_requests: 50
-            max_requests: 200
-            max_retries: 3
-        health_checks:
-        - timeout: 5s
-          interval: 10s
-          interval_jitter: 1s
-          unhealthy_threshold: 3
-          healthy_threshold: 2
-          http_health_check:
-            path: "/health"
-            host: "backend"
-            request_headers_to_add:
-            - header:
-                key: "x-envoy-health-check"
-                value: "true"
-              append: false
-        load_assignment:
-          cluster_name: websocket_cluster
-          endpoints:
-          - lb_endpoints:
-            - endpoint:
-                address:
-                  socket_address:
-                    address: envoy-poc-app-server-service.default.svc.cluster.local
-                    port_value: 80
-        # Connection pool settings for WebSocket connections
-        typed_extension_protocol_options:
-          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-            explicit_http_config:
-              http_protocol_options:
-                accept_http_10: true
-            upstream_http_protocol_options:
-              auto_sni: true
-
----
+# Enhanced Envoy Deployment with Custom Image and Redis Support
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: envoy-proxy
-  namespace: default
+  namespace: ${namespace}
   labels:
     app: envoy-proxy
     component: reverse-proxy
     version: v1.0.0
 spec:
-  replicas: 2
+  replicas: ${envoy_replicas}
   selector:
     matchLabels:
       app: envoy-proxy
@@ -159,7 +22,7 @@ spec:
     spec:
       containers:
       - name: envoy
-        image: envoyproxy/envoy:v1.29-latest
+        image: ${envoy_image}
         ports:
         - containerPort: 8080
           name: http
@@ -167,6 +30,22 @@ spec:
         - containerPort: 9901
           name: admin
           protocol: TCP
+        - containerPort: 9902
+          name: metrics
+          protocol: TCP
+        env:
+        - name: REDIS_HOST
+          value: "${redis_service_name}.${namespace}.svc.cluster.local"
+        - name: REDIS_PORT
+          value: "${redis_port}"
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MAX_CONNECTIONS_PER_POD
+          value: "${max_connections_per_pod}"
+        - name: RATE_LIMIT_REQUESTS_PER_MINUTE
+          value: "${rate_limit_requests_per_minute}"
         volumeMounts:
         - name: envoy-config
           mountPath: /etc/envoy
@@ -268,8 +147,8 @@ metadata:
     alb.ingress.kubernetes.io/healthcheck-path: /ready
     alb.ingress.kubernetes.io/healthcheck-port: "9901"
     alb.ingress.kubernetes.io/backend-protocol: HTTP
-    alb.ingress.kubernetes.io/subnets: ${PUBLIC_SUBNET_IDS}
-    alb.ingress.kubernetes.io/security-groups: ${ALB_SECURITY_GROUP_ID}
+    alb.ingress.kubernetes.io/subnets: $${PUBLIC_SUBNET_IDS}
+    alb.ingress.kubernetes.io/security-groups: $${ALB_SECURITY_GROUP_ID}
     alb.ingress.kubernetes.io/tags: "Project=envoy-poc,Environment=dev,ManagedBy=terraform,Purpose=envoy-proxy-poc"
 spec:
   rules:

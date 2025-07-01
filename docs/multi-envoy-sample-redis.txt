@@ -1,0 +1,22 @@
+# ==============================================================================
+#           REDIS-BASED SHARED STATE FOR MULTI-PROXY WEBSOCKET MANAGEMENT
+# ==============================================================================
+
+# Updated Lua script with Redis backend
+static_resources:
+  clusters:
+  # Add Redis cluster for shared state
+  - name: redis_shared_state
+    connect_timeout: 1s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: redis_shared_state
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: redis-service.default.svc.cluster.local
+                port_value: 6379
+                

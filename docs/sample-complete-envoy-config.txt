@@ -1,0 +1,427 @@
+# ==============================================================================
+#                    COMPLETE ENVOY CONFIGURATION FOR EKS WEBSOCKET PROXY
+# ==============================================================================
+
+node:
+  cluster: websocket-proxy-cluster
+  id: websocket-proxy
+
+static_resources:
+  # =============================================================================
+  #                                   LISTENERS
+  # =============================================================================
+  listeners:
+  
+  # Main WebSocket proxy listener
+  - name: websocket_listener
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 8080
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: websocket_proxy
+          use_remote_address: true
+          xff_num_trusted_hops: 2  # For ALB X-Forwarded-For headers
+          
+          # WebSocket upgrade configuration
+          upgrade_configs:
+          - upgrade_type: websocket
+            enabled: true
+          
+          # Connection management
+          stream_idle_timeout: 300s      # 5 minute WebSocket idle timeout
+          request_timeout: 60s           # Initial request timeout
+          drain_timeout: 60s             # Graceful shutdown timeout
+          
+          # HTTP filters chain
+          http_filters:
+          
+          # Rate limiting filter (local)
+          - name: envoy.filters.http.local_ratelimit
+            typed_config:
+              "@type": type.googleapis.com/udpa.type.v1.TypedStruct
+              type_url: type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+              value:
+                stat_prefix: websocket_local_rate_limiter
+                token_bucket:
+                  max_tokens: 100
+                  tokens_per_fill: 50
+                  fill_interval: 60s
+                filter_enabled:
+                  runtime_key: websocket_rate_limit_enabled
+                  default_value:
+                    numerator: 100
+                    denominator: HUNDRED
+                filter_enforced:
+                  runtime_key: websocket_rate_limit_enforced
+                  default_value:
+                    numerator: 100
+                    denominator: HUNDRED
+                response_headers_to_add:
+                - header:
+                    key: x-rate-limited
+                    value: "true"
+                  append: false
+          
+          # Global rate limiting filter (optional - requires external service)
+          - name: envoy.filters.http.ratelimit
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+              domain: websocket_connections
+              stage: 0
+              rate_limit_service:
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: rate_limit_service
+                transport_api_version: V3
+              failure_mode_deny: false  # Allow connections if rate limit service fails
+          
+          # Custom Lua filter for WebSocket connection management
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              inline_code: |
+                -- Enhanced Lua script with EKS-specific features
+                local json = require("json")
+                
+                -- Configuration
+                local CONFIG = {
+                    MAX_CONNECTIONS_PER_POD = tonumber(os.getenv("WS_MAX_CONN_PER_POD")) or 100,
+                    RATE_LIMIT_WINDOW = tonumber(os.getenv("WS_RATE_LIMIT_WINDOW")) or 60,
+                    RATE_LIMIT_REQUESTS = tonumber(os.getenv("WS_RATE_LIMIT_REQUESTS")) or 50,
+                    CLUSTER_NAME = os.getenv("WS_BACKEND_CLUSTER") or "websocket_backend_cluster",
+                    NAMESPACE = os.getenv("KUBERNETES_NAMESPACE") or "default"
+                }
+                
+                -- Shared memory keys
+                local KEYS = {
+                    POD_CONNECTIONS = "pod_conn:",
+                    POD_HEALTH = "pod_health:",
+                    TOTAL_ACTIVE = "total_active",
+                    TOTAL_REJECTED = "total_rejected",
+                    RATE_LIMITED = "rate_limited",
+                    CIRCUIT_BREAKER = "cb_open:"
+                }
+                
+                -- Helper functions
+                function get_pod_id_from_upstream()
+                    local upstream_host = request_handle:streamInfo():upstreamHost()
+                    if upstream_host then
+                        -- Extract pod IP from upstream host (format: ip:port)
+                        return string.match(upstream_host, "([^:]+)")
+                    end
+                    return nil
+                end
+                
+                function get_counter(key)
+                    return tonumber(request_handle:sharedData():get(key)) or 0
+                end
+                
+                function increment_counter(key)
+                    local current = get_counter(key)
+                    request_handle:sharedData():set(key, tostring(current + 1))
+                    return current + 1
+                end
+                
+                function get_pod_connections(pod_id)
+                    return get_counter(KEYS.POD_CONNECTIONS .. pod_id)
+                end
+                
+                function increment_pod_connections(pod_id)
+                    return increment_counter(KEYS.POD_CONNECTIONS .. pod_id)
+                end
+                
+                function decrement_pod_connections(pod_id)
+                    local key = KEYS.POD_CONNECTIONS .. pod_id
+                    local current = get_counter(key)
+                    local new_count = math.max(0, current - 1)
+                    request_handle:sharedData():set(key, tostring(new_count))
+                    return new_count
+                end
+                
+                function is_websocket_upgrade(headers)
+                    local connection = headers:get("connection")
+                    local upgrade = headers:get("upgrade")
+                    
+                    if connection and upgrade then
+                        return string.find(string.lower(connection), "upgrade") and 
+                               string.lower(upgrade) == "websocket"
+                    end
+                    return false
+                end
+                
+                function is_circuit_breaker_open(pod_id)
+                    local cb_key = KEYS.CIRCUIT_BREAKER .. pod_id
+                    local cb_status = request_handle:sharedData():get(cb_key)
+                    return cb_status == "open"
+                end
+                
+                -- Main request processing
+                function envoy_on_request(request_handle)
+                    local headers = request_handle:headers()
+                    local path = headers:get(":path")
+                    
+                    -- Handle metrics endpoint
+                    if path == "/websocket/metrics" then
+                        local metrics = string.format([[
+# HELP websocket_connections_active_total Total active WebSocket connections
+# TYPE websocket_connections_active_total counter
+websocket_connections_active_total %d
+
+# HELP websocket_connections_rejected_total Total rejected WebSocket connections
+# TYPE websocket_connections_rejected_total counter
+websocket_connections_rejected_total %d
+
+# HELP websocket_connection_rate_limited_total Total rate limited connections
+# TYPE websocket_connection_rate_limited_total counter
+websocket_connection_rate_limited_total %d
+]], 
+                            get_counter(KEYS.TOTAL_ACTIVE),
+                            get_counter(KEYS.TOTAL_REJECTED),
+                            get_counter(KEYS.RATE_LIMITED)
+                        )
+                        
+                        request_handle:respond(
+                            {[":status"] = "200", ["content-type"] = "text/plain"},
+                            metrics
+                        )
+                        return
+                    end
+                    
+                    -- Health check endpoint
+                    if path == "/health" then
+                        request_handle:respond(
+                            {[":status"] = "200", ["content-type"] = "text/plain"},
+                            "OK"
+                        )
+                        return
+                    end
+                    
+                    -- Only process WebSocket upgrade requests
+                    if not is_websocket_upgrade(headers) then
+                        return
+                    end
+                    
+                    request_handle:logInfo("Processing WebSocket upgrade request")
+                end
+                
+                -- Response processing
+                function envoy_on_response(request_handle)
+                    local response_headers = request_handle:headers()
+                    local status = response_headers:get(":status")
+                    
+                    -- WebSocket connection successfully established
+                    if status == "101" then
+                        local pod_id = get_pod_id_from_upstream()
+                        
+                        if pod_id then
+                            -- Check circuit breaker
+                            if is_circuit_breaker_open(pod_id) then
+                                request_handle:logWarn("Circuit breaker open for pod: " .. pod_id)
+                                increment_counter(KEYS.TOTAL_REJECTED)
+                                return
+                            end
+                            
+                            -- Check pod connection limit
+                            local current_connections = get_pod_connections(pod_id)
+                            if current_connections >= CONFIG.MAX_CONNECTIONS_PER_POD then
+                                request_handle:logWarn(string.format(
+                                    "Pod %s connection limit exceeded (%d/%d)", 
+                                    pod_id, current_connections, CONFIG.MAX_CONNECTIONS_PER_POD
+                                ))
+                                increment_counter(KEYS.TOTAL_REJECTED)
+                                return
+                            end
+                            
+                            -- Increment counters
+                            local new_pod_count = increment_pod_connections(pod_id)
+                            increment_counter(KEYS.TOTAL_ACTIVE)
+                            
+                            request_handle:logInfo(string.format(
+                                "WebSocket established to pod %s. Connections: %d/%d",
+                                pod_id, new_pod_count, CONFIG.MAX_CONNECTIONS_PER_POD
+                            ))
+                            
+                            -- Add custom headers for monitoring
+                            response_headers:add("x-websocket-pod-id", pod_id)
+                            response_headers:add("x-websocket-pod-connections", tostring(new_pod_count))
+                        end
+                    end
+                end
+          
+          # Health check filter
+          - name: envoy.filters.http.health_check
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+              pass_through_mode: false
+              headers:
+              - name: ":path"
+                exact_match: "/envoy/health"
+          
+          # Router filter (must be last)
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          
+          # Route configuration
+          route_config:
+            name: websocket_routes
+            virtual_hosts:
+            - name: websocket_backend
+              domains: ["*"]
+              routes:
+              
+              # Metrics endpoint
+              - match:
+                  path: "/websocket/metrics"
+                direct_response:
+                  status: 200
+                  body:
+                    inline_string: "Handled by Lua filter"
+              
+              # Health check endpoints
+              - match:
+                  path: "/health"
+                direct_response:
+                  status: 200
+                  body:
+                    inline_string: "OK"
+              
+              - match:
+                  path: "/envoy/health"
+                direct_response:
+                  status: 200
+                  body:
+                    inline_string: "OK"
+              
+              # Main WebSocket route
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: websocket_backend_cluster
+                  timeout: 0s  # Disable timeout for WebSocket connections
+                  retry_policy:
+                    retry_on: "5xx,gateway-error,connect-failure,refused-stream"
+                    num_retries: 3
+                    per_try_timeout: 10s
+                    retry_back_off:
+                      base_interval: 0.5s
+                      max_interval: 10s
+  
+  # Admin interface listener
+  - name: admin_listener
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 9901
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: admin
+          route_config:
+            name: admin_routes
+            virtual_hosts:
+            - name: admin
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: admin_cluster
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  # =============================================================================
+  #                                   CLUSTERS
+  # =============================================================================
+  clusters:
+  
+  # Main WebSocket backend cluster with EKS service discovery
+  - name: websocket_backend_cluster
+    connect_timeout: 10s
+    type: EDS  # Endpoint Discovery Service for Kubernetes integration
+    lb_policy: LEAST_REQUEST
+    
+    # Circuit breaker configuration
+    circuit_breakers:
+      thresholds:
+      - priority: DEFAULT
+        max_connections: 1000      # Total connections to cluster
+        max_pending_requests: 100  # Pending requests limit
+        max_requests: 1000         # Active requests limit
+        max_retries: 3             # Concurrent retries limit
+        track_remaining: true      # Track remaining capacity
+      - priority: HIGH
+        max_connections: 2000      # Higher limits for high priority
+        max_pending_requests: 200
+        max_requests: 2000
+        max_retries: 5
+    
+    # Per-host circuit breaker (per-pod limits)
+    per_connection_buffer_limit_bytes: 32768
+    
+    # Health checking
+    health_checks:
+    - timeout: 5s
+      interval: 10s
+      interval_jitter: 1s
+      unhealthy_threshold: 3
+      healthy_threshold: 2
+      path: "/health"
+      http_health_check:
+        path: "/health"
+        expected_statuses:
+        - start: 200
+          end: 299
+    
+    # Outlier detection (automatic circuit breaking)
+    outlier_detection:
+      consecutive_5xx: 3                    # Errors before ejection
+      consecutive_gateway_failure: 3        # Gateway failures before ejection
+      interval: 10s                         # Analysis interval
+      base_ejection_time: 30s              # Minimum ejection time
+      max_ejection_percent: 50             # Max percentage of hosts to eject
+      min_health_percent: 30               # Minimum healthy hosts required
+      split_external_local_origin_errors: true
+    
+    # Load balancing configuration
+    common_lb_config:
+      healthy_panic_threshold:
+        value: 20.0  # Panic mode if < 20% hosts healthy
+      update_merge_window: 1s
+    
+    # EDS configuration for Kubernetes service discovery
+    eds_cluster_config:
+      eds_config:
+        resource_api_version: V3
+        api_config_source:
+          api_type: GRPC
+          transport_api_version: V3
+          grpc_services:
+          - envoy_grpc:
+              cluster_name: xds_cluster
+          set_node_on_first_message_only: true
+    
+    # Connection pool settings
+    upstream_connection_options:
+      tcp_keepalive:
+        keepalive_probes: 3
+        keepalive_time: 300
+        keepalive_interval: 30
+    
+    # DNS settings for EKS
+    dns_lookup_family: V4_ONLY
+    
+    # Metadata for service discovery
+    metadata:
+      filter_metadata:
+        envoy.lb:
+          canary: false

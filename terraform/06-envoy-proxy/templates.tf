@@ -14,3 +14,18 @@ resource "local_file" "envoy_config" {
   })
   filename = "${path.module}/k8s/envoy-config.yaml"
 }
+
+# Generate Envoy deployment from template with custom image and Redis config
+resource "local_file" "envoy_deployment" {
+  content = templatefile("${path.module}/k8s/deployment.yaml.tpl", {
+    envoy_image                      = local.envoy_image
+    envoy_replicas                   = local.envoy_replicas
+    redis_service_name              = local.redis_service_name
+    redis_port                      = local.redis_port
+    namespace                       = local.namespace
+    max_connections_per_pod         = local.max_connections_per_pod
+    rate_limit_requests_per_minute  = local.rate_limit_requests_per_minute
+    path                            = path.module
+  })
+  filename = "${path.module}/k8s/deployment.yaml"
+}

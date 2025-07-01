@@ -58,7 +58,7 @@ output "connection_limits" {
   description = "Connection limiting configuration"
   value = {
     max_connections_per_pod = local.max_connections_per_pod
-    connection_rate_limit   = local.connection_rate_limit
+    rate_limit_requests_per_minute = local.rate_limit_requests_per_minute
   }
 }
 

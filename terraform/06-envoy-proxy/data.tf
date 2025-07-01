@@ -29,6 +29,9 @@ data "terraform_remote_state" "server_app" {
   }
 }
 
+# AWS caller identity for ECR repository URL
+data "aws_caller_identity" "current" {}
+
 # EKS cluster data
 data "aws_eks_cluster" "cluster" {
   name = data.terraform_remote_state.eks.outputs.cluster_name
@@ -38,8 +41,7 @@ data "aws_eks_cluster_auth" "cluster" {
   name = data.terraform_remote_state.eks.outputs.cluster_name
 }
 
-# AWS Account and Region data
-data "aws_caller_identity" "current" {}
+# AWS Region data
 data "aws_region" "current" {}
 
 # Get server service endpoints for validation

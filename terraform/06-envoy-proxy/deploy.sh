@@ -1,15 +1,28 @@
 #!/bin/bash
 
-# Terraform deployment script for Section 6: Envoy Proxy Setup
-# This script helps deploy Envoy proxy and AWS Load Balancer Controller
+# Terraform deployment script for Section 6: Enhanced Envoy Proxy Setup
+# This script deploys Envoy proxy with direct Redis support and custom image
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_CONFIG_FILE="$SCRIPT_DIR/deploy-config.env"
+
+# Load deployment configuration from file
+if [[ -f "$DEPLOY_CONFIG_FILE" ]]; then
+    echo "📋 Loading deployment configuration from: $DEPLOY_CONFIG_FILE"
+    source "$DEPLOY_CONFIG_FILE"
+else
+    echo "❌ Deployment configuration file not found: $DEPLOY_CONFIG_FILE"
+    echo "Please create the configuration file with required variables."
+    exit 1
+fi
+
 cd "$SCRIPT_DIR"
 
-echo "=== Envoy Proxy POC - Section 6: Envoy Proxy Setup ==="
+echo "=== Enhanced Envoy Proxy POC - Section 6: Envoy Proxy Setup ==="
 echo "Working directory: $(pwd)"
+echo "Project: $PROJECT_NAME ($ENVIRONMENT)"
 echo ""
 
 # Function to run terraform commands
@@ -23,11 +36,11 @@ run_terraform() {
 
 # Check AWS CLI profile
 echo "Checking AWS CLI profile..."
-aws sts get-caller-identity --profile avive-cfndev-k8s > /dev/null 2>&1
+aws sts get-caller-identity --profile "$AWS_PROFILE" > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-    echo "✓ AWS CLI profile 'avive-cfndev-k8s' is configured and accessible"
+    echo "✓ AWS CLI profile '$AWS_PROFILE' is configured and accessible"
 else
-    echo "✗ AWS CLI profile 'avive-cfndev-k8s' is not configured or accessible"
+    echo "✗ AWS CLI profile '$AWS_PROFILE' is not configured or accessible"
     echo "Please configure your AWS SSO profile before proceeding"
     exit 1
 fi
