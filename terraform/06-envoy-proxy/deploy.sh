@@ -112,10 +112,28 @@ case "$ACTION" in
             echo ""
             echo "✓ Envoy Proxy infrastructure deployed successfully!"
             
+            # Ensure Envoy ConfigMap is up-to-date with correct configuration
+            echo "Updating Envoy ConfigMap with latest configuration..."
+            if kubectl get configmap envoy-config >/dev/null 2>&1; then
+                echo "Deleting existing Envoy ConfigMap..."
+                kubectl delete configmap envoy-config
+            fi
+            echo "Creating Envoy ConfigMap from generated configuration..."
+            kubectl create configmap envoy-config --from-file=envoy.yaml=k8s/envoy-config.yaml
+            echo "✓ Envoy ConfigMap updated successfully!"
+            
             # Deploy Redis connection tracker
             echo ""
             echo "Deploying Redis connection tracker for enhanced connection management..."
             kubectl apply -f k8s/redis-deployment.yaml
+            
+            # Deploy Redis HTTP proxy for Lua script integration
+            echo "Deploying Redis HTTP proxy..."
+            kubectl apply -f k8s/redis-http-proxy.yaml
+            
+            # Update Lua ConfigMap with connection tracking script
+            echo "Updating Lua ConfigMap with unlimited connection tracking script..."
+            ./update-lua-configmap.sh
             
             echo "Waiting for Redis to be ready..."
             if kubectl wait --for=condition=available deployment/redis-connection-tracker --timeout=120s; then
@@ -123,6 +141,19 @@ case "$ACTION" in
             else
                 echo "⚠ Redis deployment may still be in progress"
             fi
+            
+            echo "Waiting for Redis HTTP proxy to be ready..."
+            if kubectl wait --for=condition=available deployment/redis-http-proxy --timeout=120s; then
+                echo "✓ Redis HTTP proxy deployed successfully!"
+            else
+                echo "⚠ Redis HTTP proxy deployment may still be in progress"
+            fi
+            
+            # Restart Envoy pods to pick up new configuration and Lua script
+            echo "Restarting Envoy pods to load updated configuration and Lua script..."
+            kubectl rollout restart deployment/envoy-proxy
+            kubectl rollout status deployment/envoy-proxy --timeout=120s
+            echo "✓ Envoy pods restarted with updated configuration!"
             
             echo ""
             echo "Deployment includes:"
@@ -162,9 +193,10 @@ case "$ACTION" in
         read -p "Are you sure you want to destroy the Envoy Proxy setup? (y/N): " -n 1 -r
         echo ""
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            # Clean up Redis first
-            echo "Cleaning up Redis connection tracker..."
+            # Clean up Redis components first
+            echo "Cleaning up Redis connection tracker and HTTP proxy..."
             kubectl delete -f k8s/redis-deployment.yaml --ignore-not-found=true
+            kubectl delete -f k8s/redis-http-proxy.yaml --ignore-not-found=true
             
             run_terraform "destroy"
             echo "✓ Envoy Proxy infrastructure and Redis destroyed!"

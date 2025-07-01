@@ -56,6 +56,14 @@ kubectl apply -f "$K8S_DIR/redis-deployment.yaml"
 # Wait for Redis to be ready
 wait_for_deployment "redis-connection-tracker"
 
+# Deploy Redis HTTP Proxy
+echo ""
+echo "📦 Deploying Redis HTTP Proxy..."
+kubectl apply -f "$K8S_DIR/redis-http-proxy.yaml"
+
+# Wait for Redis HTTP Proxy to be ready
+wait_for_deployment "redis-http-proxy"
+
 # Verify Redis is accessible
 echo "🔍 Verifying Redis connectivity..."
 if kubectl run redis-test --image=redis:7-alpine --rm -i --restart=Never -- redis-cli -h redis-connection-tracker.default.svc.cluster.local ping >/dev/null 2>&1; then
@@ -66,7 +74,11 @@ fi
 
 # Deploy updated Envoy configuration
 echo ""
-echo "📦 Deploying Enhanced Envoy Proxy with Lua Connection Tracking..."
+echo "📦 Updating Lua scripts from standalone file..."
+"$SCRIPT_DIR/update-lua-configmap.sh"
+
+echo ""
+echo "📦 Deploying Enhanced Envoy Proxy..."
 kubectl apply -f "$K8S_DIR/deployment.yaml"
 
 # Wait for Envoy deployment to be ready

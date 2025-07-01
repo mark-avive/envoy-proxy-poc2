@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: envoy-proxy-ingress
+  namespace: default
+  labels:
+    app: envoy-proxy
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /ready
+    alb.ingress.kubernetes.io/healthcheck-port: "9901"
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/subnets: subnet-01b07e29e297ea742,subnet-04d6afca47e7a4314
+    alb.ingress.kubernetes.io/security-groups: sg-0b442aa12d03875dc
+    alb.ingress.kubernetes.io/tags: "Project=envoy-poc,Environment=dev,ManagedBy=terraform,Purpose=envoy-proxy-poc"
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: envoy-proxy-service
+            port:
+              number: 8080

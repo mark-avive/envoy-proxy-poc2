@@ -1,0 +1,286 @@
+HTTP routing
+Envoy includes an HTTP router filter which can be installed to perform advanced routing tasks.
+
+This is useful both for handling edge traffic (traditional reverse proxy request handling) as well as for building a service to service Envoy mesh (typically via routing on the host/authority HTTP header to reach a particular upstream service cluster).
+
+Envoy also has the ability to be configured as forward proxy. In the forward proxy configuration, mesh clients can participate by appropriately configuring their HTTP proxy to be an Envoy.
+
+At a high level the router takes an incoming HTTP request, matches it to an upstream cluster, acquires a connection pool to a host in the upstream cluster, and forwards the request.
+
+The router filter supports many features, including:
+
+Virtual hosts and clusters
+Map domains/authorities to a set of routing rules.
+
+A virtual cluster is specified at the virtual host level and is used by Envoy to generate additional statistics on top of the standard cluster level ones. Virtual clusters can use regex matching.
+
+Path, prefix and header matching
+Route according to case sensitive and insensitive prefix and exact request paths, or use regex path matching and for more complex matching rules.
+
+Match routes according to arbitrary headers.
+
+Path, prefix and host rewriting
+Rewrite the prefix, or path using a regular expression and capture groups.
+
+Explicit host rewriting, and automatic host rewriting based on the DNS name of the selected upstream host.
+
+Request redirection
+Path/host redirection at the route level.
+
+TLS redirection at the virtual host level.
+
+Request timeouts, retries and hedging
+Request retries can be specified either via HTTP header or via route configuration.
+
+Timeouts can be specified either via HTTP header or via route configuration.
+
+Envoy also provides request hedging for retries in response to a request (per try) timeout.
+
+Traffic shifting and splitting
+Shift traffic from one upstream cluster to another via runtime values or split traffic across multiple upstream clusters according to weight/percentage-based routing (see traffic shifting/splitting).
+
+Policy-based routing
+Routing based on priority or a hash policy.
+
+Direct responses
+Non-proxied HTTP responses at the route level.
+
+Absolute URLs
+Absolute URLs are supported for non-TLS forward proxies.
+
+Route scope
+Scoped routing enables Envoy to put constraints on search space of domains and route rules.
+
+A Route Scope associates a key with a route table.
+
+For each request, a scope key is computed dynamically by the HTTP connection manager to pick the route table.
+
+RouteConfiguration associated with scope can be configured with the OnDemand filter.
+
+The Scoped RDS (SRDS) API contains a set of Scopes resources, each defining independent routing configuration, along with a ScopeKeyBuilder defining the key construction algorithm used by Envoy to look up the scope corresponding to each request.
+
+In the following (statically configured) scoped route example, Envoy will split the Addr header value by ;, ascertain key value pairs by splitting them on =, and use the first value found for key x-foo-key as the scope key.
+
+Specifically, if the Addr header value is foo=1;x-foo-key=bar;x-bar-key=something-else, then bar will be computed as the scope key to look up for corresponding route configuration.
+
+route-scope.yaml
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          codec_type: AUTO
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          scoped_routes:
+            name: scope_by_addr
+            scope_key_builder:
+              fragments:
+              - header_value_extractor:
+                  name: Addr
+                  element_separator: ";"
+                  element:
+                    key: x-foo-key
+                    separator: "="
+            scoped_route_configurations_list:
+              scoped_route_configurations:
+              - on_demand: true
+                name: scoped_route_0
+                key:
+                  fragments:
+                  - string_key: bar
+                route_configuration:
+                  name: local_route
+                  virtual_hosts:
+                  - name: local_service
+                    domains: ["*"]
+                    routes:
+                    - match:
+                        prefix: "/"
+                      route:
+                        cluster: cluster_0
+For a key to match a ScopedRouteConfiguration, the number of fragments in the computed key has to match that of the ScopedRouteConfiguration. The fragments are then matched in order.
+
+Note
+
+A missing fragment (treated as NULL) in the built key makes the request unable to match any scope, i.e. no route entry can be found for the request.
+
+Route table
+The configuration for the HTTP connection manager owns the route table that is used by all configured HTTP filters.
+
+Although the router filter is the primary consumer of the route table, other filters also have access in case they want to make decisions based on the ultimate destination of the request. For example, the built in rate limit filter consults the route table to determine whether the global rate limit service should be called based on the route.
+
+The connection manager makes sure that all calls to acquire a route are stable for a particular request, even if the decision involves randomness (e.g. in the case of a runtime configuration route rule).
+
+Retry semantics
+Envoy allows retries to be configured both in the route configuration as well as for specific requests via request headers.
+
+The following configurations are possible:
+
+Maximum number of retries
+Envoy will continue to retry any number of times.
+
+The intervals between retries are decided either by an exponential backoff algorithm (the default), or based on feedback from the upstream server via headers (if present).
+
+Note
+
+All retries are contained within the overall request timeout.
+
+This avoids long request times due to a large number of retries.
+
+Retry conditions
+Envoy can retry on different types of conditions depending on application requirements. For example, network failure, all 5xx response codes, idempotent 4xx response codes, etc.
+
+Retry budgets
+Envoy can limit the proportion of active requests via retry budgets that can be retried to prevent their contribution to large increases in traffic volume.
+
+Host selection retry plugins
+Envoy can be configured to apply additional logic when selecting hosts for retries.
+
+Specifying a retry host predicate allows for reattempting host selection when certain hosts are selected (e.g. when an already attempted host is selected), while a retry priority can be configured to adjust the priority load used when selecting a priority for retries.
+
+Note
+
+Envoy retries requests when x-envoy-overloaded is present. It is recommended to either configure retry budgets (preferred) or set maximum active retries circuit breaker to an appropriate value to avoid retry storms.
+
+Request hedging
+Envoy supports request hedging which can be enabled by specifying a hedge policy.
+
+This means that Envoy will race multiple simultaneous upstream requests and return the first response with acceptable headers to the downstream.
+
+The retry policy is used to determine whether a response should be returned or whether more responses should be awaited.
+
+Currently hedging can only be performed in response to a request timeout. This means that a retry request will be issued without cancelling the initial timed-out request and a late response will be awaited. The first “good” response according to the retry policy will be returned downstream.
+
+This implementation ensures that the same upstream request is not retried twice, which might otherwise occur if a request times out and then results in a 5xx response, creating two retriable events.
+
+Priority routing
+Envoy supports priority routing at the route level.
+
+The current priority implementation uses different connection pool and circuit breaking settings for each priority level, which means that even for HTTP/2 requests, two physical connections will be used to an upstream host.
+
+The currently supported priorities are default and high.
+
+Direct responses
+Envoy supports the sending of “direct” responses. These are preconfigured HTTP responses that do not require proxying to an upstream server.
+
+There are two ways to specify a direct response in a Route:
+
+Set the direct_response field. This works for all HTTP response statuses.
+
+Set the redirect field. This works for redirect response statuses only, but it simplifies the setting of the Location header.
+
+A direct response has an HTTP status code and an optional body.
+
+The Route configuration can specify the response body inline or specify the path of a file containing the body.
+
+If the Route configuration specifies a file pathname, Envoy will read the file upon configuration load and cache the contents.
+
+Attention
+
+If a response body is specified, by default it is limited to 4KB in size, regardless of whether it is provided inline or in a file.
+
+Envoy currently holds the entirety of the body in memory, so the 4KB default is intended to keep the proxy’s memory footprint from growing too large.
+
+If required, this limit can be changed through setting the max_direct_response_body_size_bytes field.
+
+If response_headers_to_add has been set for the Route or the enclosing Virtual Host, Envoy will include the specified headers in the direct HTTP response.
+
+Routing via generic matching
+Envoy supports using a generic match tree to specify the route table.
+
+This is a more expressive matching engine than the original one, allowing for sublinear matching on arbitrary headers (unlike the original matching engine which could only do this for :authority in some cases).
+
+To use the generic matching tree, specify a matcher on a virtual host with a Route or RouteList as the action:
+
+route-scope.yaml
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          codec_type: AUTO
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: local_service
+              domains: ["*"]
+              matcher:
+                matcher_tree:
+                  input:
+                    name: request-headers
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput
+                      header_name: :path
+                  exact_match_map:
+                    map:
+                      "/new_endpoint/foo":
+                        action:
+                          name: route_foo
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.config.route.v3.Route
+                            match:
+                              prefix: /foo
+                            route:
+                              cluster: cluster_0
+                            request_headers_to_add:
+                            - header:
+                                key: x-route-header
+                                value: new-value
+                      "/new_endpoint/bar":
+                        action:
+                          name: route_bar
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.config.route.v3.Route
+                            match:
+                              prefix: /bar
+                            route:
+                              cluster: cluster_1
+                            request_headers_to_add:
+                            - header:
+                                key: x-route-header
+                                value: new-value
+
+                      "/new_endpoint/baz":
+                        action:
+                          name: route_list
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.config.route.v3.RouteList
+                            routes:
+                            - match:
+                                prefix: /baz
+                                headers:
+                                - name: x-match-header
+                                  string_match:
+                                    exact: foo
+                              route:
+                                cluster: cluster_2
+                            - match:
+                                prefix: /baz
+                                headers:
+                                - name: x-match-header
+                                  string_match:
+                                    exact: bar
+                              route:
+                                cluster: cluster_3
+
+  clusters:
+This allows resolving the same Route proto message used for the routes-based routing using the additional matching flexibility provided by the generic matching framework.
+
+Note
+
+The resulting Route also specifies a match criteria.
+
+This must be satisfied in addition to resolving the route in order to achieve a route match.
+
+When path rewrites are used, the matched path will only depend on the match criteria of the resolved Route.
+
+Path matching done during the match tree traversal does not contribute to path rewrites.
+
+The only inputs supported are request headers (via HttpRequestHeaderMatchInput).
+
+Tip
+
+See the docs for the matching API for more information about the API as a whole.

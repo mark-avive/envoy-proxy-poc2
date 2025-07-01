@@ -2,14 +2,12 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: envoy-config
-  namespace: ${namespace}
+  namespace: default
   labels:
     app: envoy-proxy
     component: config
 data:
   envoy.yaml: |
-$${indent(4, file("${path.module}/k8s/envoy-config.yaml"))}
----
     admin:
       address:
         socket_address:
@@ -62,29 +60,30 @@ $${indent(4, file("${path.module}/k8s/envoy-config.yaml"))}
                     route:
                       cluster: websocket_cluster
               http_filters:
-              # Rate limiting filter - DISABLED for testing
-              - name: envoy.filters.http.local_ratelimit
+              # Disabled Lua filter for now due to configuration issues
+              # - name: envoy.filters.http.lua
+              #   typed_config:
+              #     "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              #     inline_code: |
+              #       function envoy_on_request(request_handle)
+              #         -- Basic rate limiting without Redis for now
+              #         request_handle:headers():add("x-envoy-processed", "true")
+              #       end
+              - name: envoy.filters.http.fault
                 typed_config:
-                  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                  stat_prefix: websocket_rate_limiter
-                  token_bucket:
-                    max_tokens: 1000
-                    tokens_per_fill: 100
-                    fill_interval: 1s
-                  filter_enabled:
-                    runtime_key: rate_limit_enabled
-                    default_value:
-                      numerator: 0
-                      denominator: HUNDRED
-                  filter_enforced:
-                    runtime_key: rate_limit_enforced
-                    default_value:
-                      numerator: 0
-                      denominator: HUNDRED
-                  response_headers_to_add:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
+                  abort:
+                    percentage:
+                      numerator: 1
+                      denominator: MILLION
+                    http_status: 503
+                  response_rate_limit:
+                    fixed_limit:
+                      limit_kbps: 1000
+                  headers:
                   - append: false
                     header:
-                      key: x-rate-limited
+                      key: x-fallback-rate-limited
                       value: 'true'
               - name: envoy.filters.http.router
                 typed_config:
@@ -95,12 +94,13 @@ $${indent(4, file("${path.module}/k8s/envoy-config.yaml"))}
         connect_timeout: 30s
         type: STRICT_DNS
         lb_policy: ROUND_ROBIN
+        dns_lookup_family: V4_ONLY
         circuit_breakers:
           thresholds:
           - priority: DEFAULT
-            max_connections: 100        # Increased for testing
-            max_pending_requests: 50
-            max_requests: 200
+            max_connections: 8        # 4 backend pods * 2 connections per pod
+            max_pending_requests: 10
+            max_requests: 20
             max_retries: 3
         health_checks:
         - timeout: 5s
@@ -108,14 +108,7 @@ $${indent(4, file("${path.module}/k8s/envoy-config.yaml"))}
           interval_jitter: 1s
           unhealthy_threshold: 3
           healthy_threshold: 2
-          http_health_check:
-            path: "/health"
-            host: "backend"
-            request_headers_to_add:
-            - header:
-                key: "x-envoy-health-check"
-                value: "true"
-              append: false
+          tcp_health_check: {}
         load_assignment:
           cluster_name: websocket_cluster
           endpoints:
@@ -124,7 +117,7 @@ $${indent(4, file("${path.module}/k8s/envoy-config.yaml"))}
                 address:
                   socket_address:
                     address: envoy-poc-app-server-service.default.svc.cluster.local
-                    port_value: 80
+                    port_value: 8080
         # Connection pool settings for WebSocket connections
         typed_extension_protocol_options:
           envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -135,6 +128,25 @@ $${indent(4, file("${path.module}/k8s/envoy-config.yaml"))}
             upstream_http_protocol_options:
               auto_sni: true
 
+      - name: redis_http_proxy
+        connect_timeout: 5s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        dns_lookup_family: V4_ONLY
+        load_assignment:
+          cluster_name: redis_http_proxy
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: redis-http-proxy.default.svc.cluster.local
+                    port_value: 8080
+
+---
+# Note: The envoy-lua-scripts ConfigMap will be created by the update-lua-configmap.sh script
+# from the standalone redis-connection-tracker.lua file
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -143,8 +155,7 @@ metadata:
   namespace: default
   labels:
     app: envoy-proxy
-    component: reverse-proxy
-    version: v1.0.0
+    component: proxy
 spec:
   replicas: 2
   selector:
@@ -154,19 +165,19 @@ spec:
     metadata:
       labels:
         app: envoy-proxy
-        component: reverse-proxy
-        version: v1.0.0
+        component: proxy
     spec:
       containers:
       - name: envoy
-        image: envoyproxy/envoy:v1.29-latest
+        image: envoyproxy/envoy:v1.31-latest
         ports:
         - containerPort: 8080
           name: http
-          protocol: TCP
         - containerPort: 9901
           name: admin
-          protocol: TCP
+        env:
+        - name: ENVOY_LOG_LEVEL
+          value: "info"
         volumeMounts:
         - name: envoy-config
           mountPath: /etc/envoy
@@ -187,38 +198,23 @@ spec:
         - info
         resources:
           requests:
-            cpu: 125m
-            memory: 128Mi
+            memory: "128Mi"
+            cpu: "100m"
           limits:
-            cpu: 250m
-            memory: 256Mi
+            memory: "512Mi"
+            cpu: "500m"
         livenessProbe:
           httpGet:
             path: /ready
             port: 9901
-            scheme: HTTP
-          initialDelaySeconds: 30
-          periodSeconds: 30
-          timeoutSeconds: 5
-          failureThreshold: 3
+          initialDelaySeconds: 15
+          periodSeconds: 20
         readinessProbe:
           httpGet:
             path: /ready
             port: 9901
-            scheme: HTTP
           initialDelaySeconds: 5
           periodSeconds: 10
-          timeoutSeconds: 3
-          failureThreshold: 3
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 1000
-          runAsGroup: 1000
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop:
-            - ALL
       volumes:
       - name: envoy-config
         configMap:
@@ -227,7 +223,6 @@ spec:
         configMap:
           name: envoy-lua-scripts
       restartPolicy: Always
-      terminationGracePeriodSeconds: 30
 
 ---
 apiVersion: v1
@@ -237,48 +232,34 @@ metadata:
   namespace: default
   labels:
     app: envoy-proxy
-    component: reverse-proxy
+    component: service
 spec:
-  type: ClusterIP
+  selector:
+    app: envoy-proxy
   ports:
-  - port: 80
+  - port: 8080
     targetPort: 8080
-    protocol: TCP
     name: http
   - port: 9901
     targetPort: 9901
-    protocol: TCP
     name: admin
-  selector:
-    app: envoy-proxy
+  type: ClusterIP
 
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: v1
+kind: Service
 metadata:
-  name: envoy-proxy-ingress
+  name: envoy-proxy-nodeport
   namespace: default
   labels:
     app: envoy-proxy
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
-    alb.ingress.kubernetes.io/healthcheck-path: /ready
-    alb.ingress.kubernetes.io/healthcheck-port: "9901"
-    alb.ingress.kubernetes.io/backend-protocol: HTTP
-    alb.ingress.kubernetes.io/subnets: ${PUBLIC_SUBNET_IDS}
-    alb.ingress.kubernetes.io/security-groups: ${ALB_SECURITY_GROUP_ID}
-    alb.ingress.kubernetes.io/tags: "Project=envoy-poc,Environment=dev,ManagedBy=terraform,Purpose=envoy-proxy-poc"
+    component: nodeport
 spec:
-  rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: envoy-proxy-service
-            port:
-              number: 80
+  selector:
+    app: envoy-proxy
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30080
+    name: http
+  type: NodePort

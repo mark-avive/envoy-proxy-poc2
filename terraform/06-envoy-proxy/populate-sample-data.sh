@@ -20,16 +20,17 @@ redis_exec() {
 # Set readiness flags
 echo "Setting readiness flags..."
 redis_exec SET "redis:status:connected" "true"
-redis_exec EXPIRE "redis:status:connected" 300
+redis_exec EXPIRE "redis:status:connected" 1800  # 30 minutes
 
 redis_exec SET "redis:status:ready_for_scaling" "true"
-redis_exec EXPIRE "redis:status:ready_for_scaling" 300
+redis_exec EXPIRE "redis:status:ready_for_scaling" 1800  # 30 minutes
 
 redis_exec HMSET "redis:readiness:quality" \
     "confidence_level" "high" \
     "data_completeness_pct" "98" \
     "last_full_refresh" "$(date +%s)" \
     "pods_reporting" "5"
+redis_exec EXPIRE "redis:readiness:quality" 1800  # 30 minutes
 
 # Populate connection data for each pod
 echo "Setting up pod connection data..."
@@ -43,7 +44,7 @@ for POD_IP in $BACKEND_PODS; do
     
     # Set established connection count
     redis_exec SET "pod:established_count:$POD_IP" "$CONNECTIONS"
-    redis_exec EXPIRE "pod:established_count:$POD_IP" 3600
+    redis_exec EXPIRE "pod:established_count:$POD_IP" 1800  # 30 minutes
     
     # Create active connections set
     for ((i=1; i<=CONNECTIONS; i++)); do
@@ -57,9 +58,9 @@ for POD_IP in $BACKEND_PODS; do
             "established_time" "$((CURRENT_TIME - RANDOM % 3600))" \
             "last_activity" "$CURRENT_TIME" \
             "user_agent" "WebSocket-Client-1.0"
-        redis_exec EXPIRE "connection:$CONNECTION_ID" 3600
+        redis_exec EXPIRE "connection:$CONNECTION_ID" 1800  # 30 minutes
     done
-    redis_exec EXPIRE "active_connections:$POD_IP" 3600
+    redis_exec EXPIRE "active_connections:$POD_IP" 1800  # 30 minutes
     
     # Calculate priority (lower connections = higher priority for scale down)
     PRIORITY_SCORE=$((10 - CONNECTIONS))
@@ -71,7 +72,7 @@ for POD_IP in $BACKEND_PODS; do
         "last_updated" "$CURRENT_TIME" \
         "idle_connections" "$((CONNECTIONS > 0 ? RANDOM % CONNECTIONS : 0))" \
         "avg_connection_duration" "$((RANDOM % 3600))"
-    redis_exec EXPIRE "pod:scaling_data:$POD_IP" 3600
+    redis_exec EXPIRE "pod:scaling_data:$POD_IP" 1800  # 30 minutes
     
     # Add to scaling candidates
     redis_exec ZADD "scaling:candidates:scale_down" "$PRIORITY_SCORE" "$POD_IP"
@@ -81,14 +82,14 @@ for POD_IP in $BACKEND_PODS; do
         BUCKET_5M=$((CURRENT_TIME / 300 * 300))
         REJECTIONS=$((RANDOM % 5 + 1))
         redis_exec ZINCRBY "rate_limit_rejections:5m:$POD_IP" "$REJECTIONS" "$BUCKET_5M"
-        redis_exec EXPIRE "rate_limit_rejections:5m:$POD_IP" 300
+        redis_exec EXPIRE "rate_limit_rejections:5m:$POD_IP" 1800  # 30 minutes
     fi
     
     if [ $((RANDOM % 3)) -eq 1 ]; then
         BUCKET_5M=$((CURRENT_TIME / 300 * 300))
         REJECTIONS=$((RANDOM % 3 + 1))
         redis_exec ZINCRBY "max_limit_rejections:5m:$POD_IP" "$REJECTIONS" "$BUCKET_5M"
-        redis_exec EXPIRE "max_limit_rejections:5m:$POD_IP" 300
+        redis_exec EXPIRE "max_limit_rejections:5m:$POD_IP" 1800  # 30 minutes
     fi
     
     echo "  Pod $POD_IP: $CONNECTIONS connections, priority $PRIORITY_SCORE"

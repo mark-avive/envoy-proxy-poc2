@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-http-proxy
+  labels:
+    app: redis-http-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-http-proxy
+  template:
+    metadata:
+      labels:
+        app: redis-http-proxy
+    spec:
+      containers:
+      - name: redis-http-proxy
+        image: python:3.9-slim
+        ports:
+        - containerPort: 8080
+        env:
+        - name: REDIS_HOST
+          value: "redis-connection-tracker.default.svc.cluster.local"
+        - name: REDIS_PORT
+          value: "6379"
+        command:
+        - /bin/bash
+        - -c
+        - |
+          pip install redis
+          python3 -c "
+          import os
+          import json
+          import redis
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          import urllib.parse
+          
+          redis_client = redis.Redis(
+              host=os.environ.get('REDIS_HOST', 'localhost'),
+              port=int(os.environ.get('REDIS_PORT', 6379)),
+              decode_responses=True
+          )
+          
+          class RedisProxyHandler(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  if self.path == '/redis':
+                      try:
+                          content_length = int(self.headers['Content-Length'])
+                          post_data = self.rfile.read(content_length).decode('utf-8')
+                          
+                          # Parse Redis command
+                          parts = post_data.strip().split()
+                          if not parts:
+                              self.send_error(400, 'Empty command')
+                              return
+                          
+                          command = parts[0].upper()
+                          args = [p.strip('\"') for p in parts[1:]]
+                          
+                          # Execute Redis command
+                          if command == 'SET':
+                              result = redis_client.set(args[0], args[1])
+                          elif command == 'GET':
+                              result = redis_client.get(args[0])
+                          elif command == 'INCR':
+                              result = redis_client.incr(args[0])
+                          elif command == 'DECR':
+                              result = redis_client.decr(args[0])
+                          elif command == 'HMSET':
+                              key = args[0]
+                              hash_data = {}
+                              for i in range(1, len(args), 2):
+                                  if i + 1 < len(args):
+                                      hash_data[args[i]] = args[i + 1]
+                              result = redis_client.hmset(key, hash_data)
+                          elif command == 'SADD':
+                              result = redis_client.sadd(args[0], *args[1:])
+                          elif command == 'SREM':
+                              result = redis_client.srem(args[0], *args[1:])
+                          elif command == 'SCARD':
+                              result = redis_client.scard(args[0])
+                          elif command == 'EXPIRE':
+                              result = redis_client.expire(args[0], int(args[1]))
+                          elif command == 'ZINCRBY':
+                              result = redis_client.zincrby(args[0], float(args[1]), args[2])
+                          elif command == 'ZADD':
+                              result = redis_client.zadd(args[0], {args[2]: float(args[1])})
+                          elif command == 'ZREMRANGEBYSCORE':
+                              result = redis_client.zremrangebyscore(args[0], float(args[1]), float(args[2]))
+                          elif command == 'DEL':
+                              result = redis_client.delete(*args)
+                          else:
+                              self.send_error(400, f'Unsupported command: {command}')
+                              return
+                          
+                          self.send_response(200)
+                          self.send_header('Content-type', 'text/plain')
+                          self.end_headers()
+                          self.wfile.write(str(result).encode('utf-8'))
+                          
+                      except Exception as e:
+                          self.send_error(500, f'Redis error: {str(e)}')
+                  else:
+                      self.send_error(404, 'Not found')
+              
+              def do_GET(self):
+                  if self.path == '/health':
+                      try:
+                          redis_client.ping()
+                          self.send_response(200)
+                          self.send_header('Content-type', 'text/plain')
+                          self.end_headers()
+                          self.wfile.write(b'OK')
+                      except Exception as e:
+                          self.send_error(500, f'Redis health check failed: {str(e)}')
+                  else:
+                      self.send_error(404, 'Not found')
+              
+              def log_message(self, format, *args):
+                  pass  # Suppress default logging
+          
+          if __name__ == '__main__':
+              server = HTTPServer(('0.0.0.0', 8080), RedisProxyHandler)
+              print('Redis HTTP proxy listening on port 8080')
+              server.serve_forever()
+          "
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-http-proxy
+spec:
+  selector:
+    app: redis-http-proxy
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http

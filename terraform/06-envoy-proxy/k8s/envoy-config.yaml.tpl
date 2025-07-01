@@ -74,6 +74,12 @@ static_resources:
                 header:
                   key: x-rate-limited
                   value: 'true'
+          # Lua script for Redis connection tracking (tracking only - no limits)
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                filename: "/etc/envoy/lua/redis-connection-tracker.lua"
           # Circuit breaker for connection limiting
           - name: envoy.filters.http.fault
             typed_config:
@@ -137,3 +143,19 @@ static_resources:
             accept_http_10: true
         upstream_http_protocol_options:
           auto_sni: true
+
+  # Redis HTTP Proxy cluster for Lua script Redis communication
+  - name: redis_http_proxy
+    connect_timeout: 5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    dns_lookup_family: V4_ONLY
+    load_assignment:
+      cluster_name: redis_http_proxy
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: redis-http-proxy.${namespace}.svc.cluster.local
+                port_value: 8080

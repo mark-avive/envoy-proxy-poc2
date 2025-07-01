@@ -1,0 +1,6 @@
+Local rate limiting
+Envoy supports local (non-distributed) rate limiting of L4 connections via the local rate limit listener filter and local rate limit network filter. The difference is local rate limit listener filter processes the sockets before TLS handshake and filter chain matching.
+
+Envoy additionally supports local rate limiting of HTTP requests via the HTTP local rate limit filter. This can be activated globally at the listener level or at a more specific level (e.g.: the virtual host or route level).
+
+Finally, Envoy also supports global rate limiting. Local rate limiting can be used in conjunction with global rate limiting to reduce load on the global rate limit service.

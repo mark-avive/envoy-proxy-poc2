@@ -22,19 +22,19 @@ locals {
   envoy_service_name = "envoy-proxy-service"
   backend_service_name = "envoy-poc-app-server-service"
   
-  # Rate Limiting Configuration
-  max_connections_per_pod = 2
+  # Rate Limiting Configuration - RELAXED for testing
+  max_connections_per_pod = 100  # Increased for testing
   connection_rate_limit = "1/s"  # 1 connection per second
   
-  # Rate Limiting Token Bucket Settings
-  max_tokens      = 10    # Maximum tokens in bucket
-  tokens_per_fill = 1     # Tokens added per interval  
+  # Rate Limiting Token Bucket Settings - For WebSocket connection establishment rate only
+  max_tokens      = 50    # Allow burst of 50 new connections
+  tokens_per_fill = 10    # 10 new connections per second
   fill_interval   = "1s"  # Token refill interval
   
-  # Circuit Breaker Configuration
-  max_connections      = 10   # 5 backend pods * 2 connections per pod
-  max_pending_requests = 10   # Queue limit for pending requests
-  max_requests         = 20   # Active request limit
+  # Circuit Breaker Configuration - RELAXED for testing
+  max_connections      = 100  # Increased for testing
+  max_pending_requests = 50   # Increased queue limit for pending requests
+  max_requests         = 200  # Increased active request limit
   max_retries          = 3    # Retry limit
   
   # Server Service Configuration for DNS Discovery
