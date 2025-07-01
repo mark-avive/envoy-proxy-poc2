@@ -117,14 +117,14 @@ static_resources:
         upstream_http_protocol_options:
           auto_sni: true
 
-  # Redis HTTP Proxy cluster for Lua script Redis communication
-  - name: redis_http_proxy
+  # Redis HTTP Proxy cluster for Lua script Redis communication (Option B)
+  - name: redis_http_proxy_cluster
     connect_timeout: 5s
     type: STRICT_DNS
     lb_policy: ROUND_ROBIN
     dns_lookup_family: V4_ONLY
     load_assignment:
-      cluster_name: redis_http_proxy
+      cluster_name: redis_http_proxy_cluster
       endpoints:
       - lb_endpoints:
         - endpoint:

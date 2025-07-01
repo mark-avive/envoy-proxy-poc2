@@ -3,7 +3,7 @@
 
 -- Redis configuration
 local REDIS_CONFIG = {
-    HOST = os.getenv("REDIS_HOST") or "redis-service.default.svc.cluster.local",
+    HOST = os.getenv("REDIS_HOST") or "redis-connection-tracker.default.svc.cluster.local",
     PORT = tonumber(os.getenv("REDIS_PORT")) or 6379,
     TIMEOUT = 1000,
     POOL_SIZE = 10
@@ -25,30 +25,38 @@ local CONFIG = {
     PROXY_ID = os.getenv("HOSTNAME") or "envoy-unknown"
 }
 
--- Get Redis connection (would require lua-redis library)
+-- Get Redis connection via HTTP proxy
 function get_redis_connection()
-    -- NOTE: This requires adding lua-redis library to Envoy
-    -- Alternative: Continue with HTTP proxy but make it atomic
-    local redis = require("redis")
-    local red = redis:new()
-    red:set_timeout(REDIS_CONFIG.TIMEOUT)
+    -- Use HTTP proxy for Redis communication (Option B)
+    -- This maintains atomicity while using proven HTTP patterns
+    return "http_proxy", nil
+end
+
+-- HTTP-based Redis command execution
+function redis_http_call(handle, command)
+    local headers = {
+        [":method"] = "POST",
+        [":path"] = "/redis",
+        [":authority"] = "redis-http-proxy.default.svc.cluster.local:8080",
+        ["content-type"] = "text/plain"
+    }
     
-    local ok, err = red:connect(REDIS_CONFIG.HOST, REDIS_CONFIG.PORT)
-    if not ok then
-        return nil, "Failed to connect to Redis: " .. tostring(err)
+    local response_headers, response_body = handle:httpCall(
+        "redis_http_proxy",  -- Match the cluster name in envoy config
+        headers,
+        command,
+        1000  -- 1 second timeout
+    )
+    
+    if response_headers and response_headers[":status"] == "200" then
+        return response_body
+    else
+        return nil, string.format("HTTP Redis call failed: %s", response_headers and response_headers[":status"] or "no response")
     end
-    
-    return red, nil
 end
 
 -- Atomic check-and-increment for pod connections (CRITICAL: Prevents race conditions)
 function redis_atomic_check_and_increment(handle, pod_id, max_connections)
-    local red, err = get_redis_connection()
-    if not red then
-        handle:logErr("[REDIS-TRACKER] Redis unavailable: " .. err)
-        return false, 0, "Redis unavailable"
-    end
-    
     local key = string.format(REDIS_KEYS.POD_CONNECTIONS, pod_id)
     
     -- Redis Lua script for atomic check-and-increment
@@ -66,21 +74,32 @@ function redis_atomic_check_and_increment(handle, pod_id, max_connections)
             return {false, current, "limit_exceeded"}
         else
             local new_count = redis.call('INCR', key)
-            redis.call('EXPIRE', key, 86400)  -- 24 hour expiration
+            redis.call('EXPIRE', key, 86400)
             return {true, new_count, "success"}
         end
     ]]
     
-    local result, err = red:eval(lua_script, 1, key, max_connections)
-    red:close()
+    -- Execute atomic script via HTTP proxy
+    local escaped_script = string.gsub(lua_script, "\n", "\\n")
+    escaped_script = string.gsub(escaped_script, "\t", "\\t")
+    local command = string.format('EVAL "%s" 1 "%s" %d', escaped_script, key, max_connections)
     
-    if not result then
-        handle:logErr("[REDIS-TRACKER] Redis eval failed: " .. tostring(err))
-        return false, 0, "Redis eval failed"
+    local result_json, err = redis_http_call(handle, command)
+    if not result_json then
+        handle:logErr("[REDIS-TRACKER] Redis HTTP call failed: " .. (err or "unknown error"))
+        return false, 0, "Redis HTTP call failed"
+    end
+    
+    -- Parse JSON response from HTTP proxy
+    local json = require("cjson")
+    local success, result = pcall(json.decode, result_json)
+    if not success or not result or type(result) ~= "table" or #result < 3 then
+        handle:logErr("[REDIS-TRACKER] Invalid Redis response: " .. tostring(result_json))
+        return false, 0, "Invalid Redis response"
     end
     
     local allowed = result[1]
-    local count = result[2]
+    local count = result[2] 
     local status = result[3]
     
     return allowed, count, status
@@ -88,12 +107,6 @@ end
 
 -- Atomic decrement for connection cleanup
 function redis_atomic_decrement(handle, pod_id)
-    local red, err = get_redis_connection()
-    if not red then
-        handle:logErr("[REDIS-TRACKER] Redis unavailable for decrement: " .. err)
-        return false
-    end
-    
     local key = string.format(REDIS_KEYS.POD_CONNECTIONS, pod_id)
     
     -- Redis Lua script for atomic decrement (don't go below 0)
@@ -107,43 +120,37 @@ function redis_atomic_decrement(handle, pod_id)
         end
     ]]
     
-    local result, err = red:eval(lua_script, 1, key)
-    red:close()
+    local escaped_script = string.gsub(lua_script, "\n", "\\n")
+    escaped_script = string.gsub(escaped_script, "\t", "\\t")
+    local command = string.format('EVAL "%s" 1 "%s"', escaped_script, key)
     
+    local result, err = redis_http_call(handle, command)
     if result then
-        handle:logInfo(string.format("[REDIS-TRACKER] Decremented connections for pod %s to %d", pod_id, result))
+        local count = tonumber(result) or 0
+        handle:logInfo(string.format("[REDIS-TRACKER] Decremented connections for pod %s to %d", pod_id, count))
         return true
     else
-        handle:logErr("[REDIS-TRACKER] Failed to decrement pod connections: " .. tostring(err))
+        handle:logErr("[REDIS-TRACKER] Failed to decrement pod connections: " .. (err or "unknown error"))
         return false
     end
 end
 
 -- Distributed rate limiting with Redis
 function redis_check_rate_limit(handle, requests_per_minute)
-    local red, err = get_redis_connection()
-    if not red then
+    local current_minute = math.floor(os.time() / 60)
+    local key = string.format(REDIS_KEYS.RATE_LIMIT_WINDOW, current_minute)
+    
+    -- Increment and set expiration via HTTP calls
+    local incr_result, err = redis_http_call(handle, string.format('INCR "%s"', key))
+    if not incr_result then
         handle:logWarn("[REDIS-TRACKER] Redis unavailable for rate limiting, allowing request")
         return false  -- Fail open for rate limiting
     end
     
-    local current_minute = math.floor(os.time() / 60)
-    local key = string.format(REDIS_KEYS.RATE_LIMIT_WINDOW, current_minute)
+    -- Set expiration for the key
+    redis_http_call(handle, string.format('EXPIRE "%s" 60', key))
     
-    -- Use Redis pipeline for atomic operations
-    red:init_pipeline()
-    red:incr(key)
-    red:expire(key, 60)  -- Expire after 60 seconds
-    local results, err = red:commit_pipeline()
-    
-    red:close()
-    
-    if not results then
-        handle:logErr("[REDIS-TRACKER] Redis rate limit check failed: " .. tostring(err))
-        return false  -- Fail open
-    end
-    
-    local current_count = results[1]
+    local current_count = tonumber(incr_result) or 0
     return current_count > requests_per_minute
 end
 
@@ -280,48 +287,42 @@ function envoy_on_stream_done(request_handle)
         redis_atomic_decrement(request_handle, pod_id)
         
         -- Decrement global counter
-        local red, err = get_redis_connection()
-        if red then
-            red:decr(REDIS_KEYS.GLOBAL_CONNECTIONS)
-            red:close()
-        end
+        redis_http_call(request_handle, string.format('DECR "%s"', REDIS_KEYS.GLOBAL_CONNECTIONS))
     end
 end
 
 -- Helper function to increment counters
 function increment_counter(handle, key)
-    local red, err = get_redis_connection()
-    if red then
-        red:incr(key)
-        red:close()
-    else
-        handle:logErr("[REDIS-TRACKER] Failed to increment counter " .. key .. ": " .. err)
+    local result, err = redis_http_call(handle, string.format('INCR "%s"', key))
+    if not result then
+        handle:logErr("[REDIS-TRACKER] Failed to increment counter " .. key .. ": " .. (err or "unknown error"))
     end
 end
 
 -- Metrics handler for multi-proxy aggregation
 function handle_metrics_request(request_handle)
-    local red, err = get_redis_connection()
-    if not red then
+    local global_active, err1 = redis_http_call(request_handle, string.format('GET "%s"', REDIS_KEYS.GLOBAL_CONNECTIONS))
+    local global_rejected, err2 = redis_http_call(request_handle, string.format('GET "%s"', REDIS_KEYS.REJECTED_CONNECTIONS))
+    
+    if not global_active or not global_rejected then
         request_handle:respond(
             {[":status"] = "503", ["content-type"] = "text/plain"},
-            "Metrics unavailable - Redis connection failed"
+            "Metrics unavailable - Redis HTTP call failed"
         )
         return
     end
     
-    local global_active = red:get(REDIS_KEYS.GLOBAL_CONNECTIONS) or 0
-    local global_rejected = red:get(REDIS_KEYS.REJECTED_CONNECTIONS) or 0
-    red:close()
+    global_active = tonumber(global_active) or 0
+    global_rejected = tonumber(global_rejected) or 0
     
     local metrics = string.format([[
 # HELP websocket_connections_active_total Total active WebSocket connections (all proxies)
 # TYPE websocket_connections_active_total counter
-websocket_connections_active_total %s
+websocket_connections_active_total %d
 
 # HELP websocket_connections_rejected_total Total rejected WebSocket connections (all proxies)
 # TYPE websocket_connections_rejected_total counter
-websocket_connections_rejected_total %s
+websocket_connections_rejected_total %d
 
 # HELP websocket_proxy_instance Instance identifier
 # TYPE websocket_proxy_instance gauge
