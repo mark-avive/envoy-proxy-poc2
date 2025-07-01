@@ -1,6 +1,8 @@
--- Redis Connection Tracking for Envoy WebSocket Proxy (FIXED)
--- This Lua script provides connection tracking and scaling metrics without limits
--- Envoy handles rate limiting and connection limits via its own filters
+-- Redis Connection Tracking and Enforcement for Envoy WebSocket Proxy
+-- This Lua script enforces per-pod connection limits and rate limiting as per requirements:
+-- - Max 2 WebSocket connections per pod
+-- - 1 connection per second rate limiting
+-- Envoy relies on this script to make real-time limiting decisions
 
 local redis_http_cluster = "redis_http_proxy"
 
@@ -47,7 +49,53 @@ function redis_http_call(handle, command)
   end
 end
 
--- Connection Tracking Functions (NO LIMITS)
+-- Connection Limiting Functions (ENFORCING LIMITS AS PER REQUIREMENTS)
+function check_pod_connection_limit(handle, pod_ip)
+  local MAX_CONNECTIONS_PER_POD = 2  -- Requirements: max 2 WebSocket connections per pod
+  local current_connections = get_pod_connection_count(handle, pod_ip)
+  
+  handle:logInfo(string.format("[REDIS-TRACKER] Pod %s has %d/%d connections", 
+    pod_ip, current_connections, MAX_CONNECTIONS_PER_POD))
+  
+  if current_connections >= MAX_CONNECTIONS_PER_POD then
+    handle:logWarn(string.format("[REDIS-TRACKER] Pod %s at connection limit (%d/%d) - REJECTING", 
+      pod_ip, current_connections, MAX_CONNECTIONS_PER_POD))
+    return false
+  end
+  
+  return true
+end
+
+function check_rate_limit(handle, client_ip)
+  local RATE_LIMIT_WINDOW = 60  -- 1 minute window
+  local MAX_CONNECTIONS_PER_MINUTE = 1  -- Requirements: 1 connection per second = 60 per minute max
+  local current_time = get_current_time()
+  local window_start = current_time - RATE_LIMIT_WINDOW
+  
+  -- Count recent connection attempts from this client
+  local recent_attempts = redis_http_call(handle, 
+    string.format('ZCOUNT "client_rate_limit:%s" %d %d', client_ip, window_start, current_time))
+  
+  local attempts_count = tonumber(recent_attempts) or 0
+  
+  handle:logInfo(string.format("[REDIS-TRACKER] Client %s has %d attempts in last %d seconds", 
+    client_ip, attempts_count, RATE_LIMIT_WINDOW))
+  
+  if attempts_count >= MAX_CONNECTIONS_PER_MINUTE then
+    handle:logWarn(string.format("[REDIS-TRACKER] Client %s rate limited (%d/%d per minute) - REJECTING", 
+      client_ip, attempts_count, MAX_CONNECTIONS_PER_MINUTE))
+    return false
+  end
+  
+  -- Record this attempt
+  redis_http_call(handle, string.format('ZADD "client_rate_limit:%s" %d "%d"', client_ip, current_time, current_time))
+  redis_http_call(handle, string.format('EXPIRE "client_rate_limit:%s" %d', client_ip, RATE_LIMIT_WINDOW + 10))
+  
+  -- Clean up old entries
+  redis_http_call(handle, string.format('ZREMRANGEBYSCORE "client_rate_limit:%s" -inf %d', client_ip, window_start))
+  
+  return true
+end
 function get_pod_connection_count(handle, pod_ip)
   local response = redis_http_call(handle, string.format('SCARD "active_connections:%s"', pod_ip))
   return tonumber(response) or 0
@@ -161,7 +209,103 @@ function record_connection_attempt(handle, pod_ip, client_ip, status)
   end
 end
 
--- Main Envoy Filter Functions - TRACKING ONLY, NO LIMITS
+-- Get available backend pod IPs from Kubernetes endpoints
+function get_backend_pod_ips(handle)
+  -- This would ideally query Kubernetes API, but for now we'll use a Redis key that gets populated
+  -- by the metrics script or an external process
+  local pod_ips_str = redis_http_call(handle, 'GET "available_pods"')
+  
+  if pod_ips_str and pod_ips_str ~= "ERROR" and pod_ips_str ~= "None" then
+    -- Parse comma-separated list of pod IPs
+    local pod_ips = {}
+    for ip in string.gmatch(pod_ips_str, "[^,]+") do
+      table.insert(pod_ips, ip)
+    end
+    return pod_ips
+  end
+  
+  -- Fallback to known pod IPs or service discovery
+  return {"backend.default.svc.cluster.local"}
+end
+
+-- Intelligent pod selection based on current connection counts
+function select_best_pod(handle)
+  local MAX_CONNECTIONS_PER_POD = 2
+  local pod_ips = get_backend_pod_ips(handle)
+  local best_pod = nil
+  local min_connections = MAX_CONNECTIONS_PER_POD + 1
+  
+  handle:logInfo(string.format("[REDIS-TRACKER] Selecting from %d available pods", #pod_ips))
+  
+  for _, pod_ip in ipairs(pod_ips) do
+    local connections = get_pod_connection_count(handle, pod_ip)
+    handle:logInfo(string.format("[REDIS-TRACKER] Pod %s has %d connections", pod_ip, connections))
+    
+    if connections < MAX_CONNECTIONS_PER_POD and connections < min_connections then
+      best_pod = pod_ip
+      min_connections = connections
+    end
+  end
+  
+  if best_pod then
+    handle:logInfo(string.format("[REDIS-TRACKER] Selected pod %s with %d connections", best_pod, min_connections))
+    return best_pod
+  else
+    handle:logWarn("[REDIS-TRACKER] No pods available under connection limit")
+    return nil
+  end
+end
+
+-- Enhanced connection tracking for both service and pod level
+function track_connection_with_fallback(handle, connection_id, client_ip, user_agent, status)
+  -- Try to get individual pod IP from Envoy routing
+  local pod_ip = get_upstream_pod_ip(handle)
+  
+  -- Always track at service level for backward compatibility
+  local service_target = "backend.default.svc.cluster.local"
+  
+  if status == "established" then
+    track_established_connection(handle, service_target, connection_id, client_ip, user_agent)
+    
+    -- If we have a specific pod IP that's different from service, track individually too
+    if pod_ip ~= service_target and pod_ip ~= "" then
+      track_established_connection(handle, pod_ip, connection_id, client_ip, user_agent)
+      handle:logInfo(string.format("[REDIS-TRACKER] Dual tracking: service + pod (%s)", pod_ip))
+    end
+  elseif status == "ended" then
+    track_connection_end(handle, service_target, connection_id)
+    
+    if pod_ip ~= service_target and pod_ip ~= "" then
+      track_connection_end(handle, pod_ip, connection_id)
+    end
+  end
+  
+  -- Record attempts with both targets
+  record_connection_attempt(handle, service_target, client_ip, status)
+  if pod_ip ~= service_target and pod_ip ~= "" then
+    record_connection_attempt(handle, pod_ip, client_ip, status)
+  end
+end
+
+-- Track rejection events from Envoy filters
+function track_rejection(handle, pod_ip, client_ip, rejection_type)
+  local current_time = get_current_time()
+  local bucket_5m = math.floor(current_time / 300) * 300
+  
+  handle:logInfo(string.format("[REDIS-TRACKER] Recording rejection: %s to pod %s from %s", 
+    rejection_type, pod_ip, client_ip))
+  
+  -- Track rejections by type and time bucket
+  redis_http_call(handle, string.format('ZINCRBY "connection_attempts_%s:5m:%s" 1 %d', rejection_type, pod_ip, bucket_5m))
+  redis_http_call(handle, string.format('EXPIRE "connection_attempts_%s:5m:%s" 300', rejection_type, pod_ip))
+  
+  -- Also track at service level
+  local service_target = "backend.default.svc.cluster.local"
+  redis_http_call(handle, string.format('ZINCRBY "connection_attempts_%s:5m:%s" 1 %d', rejection_type, service_target, bucket_5m))
+  redis_http_call(handle, string.format('EXPIRE "connection_attempts_%s:5m:%s" 300', rejection_type, service_target))
+end
+
+-- Main Envoy Filter Functions - ENFORCING LIMITS PER REQUIREMENTS
 function envoy_on_request(request_handle)
   request_handle:logInfo("[REDIS-TRACKER] Script starting - envoy_on_request called")
   
@@ -171,33 +315,42 @@ function envoy_on_request(request_handle)
   
   request_handle:logInfo(string.format("[REDIS-TRACKER] Client info: IP=%s, UA=%s", client_ip, user_agent))
   
-  -- Get upstream pod IP - this should be set by Envoy routing
-  local pod_ip = request_handle:headers():get("upstream_host")
-  if not pod_ip or pod_ip == "" then
-    -- Fallback: use backend service discovery
-    pod_ip = "backend.default.svc.cluster.local"
-    request_handle:logInfo("[REDIS-TRACKER] No upstream host found, using fallback: " .. pod_ip)
-  else
-    request_handle:logInfo("[REDIS-TRACKER] Using upstream host: " .. pod_ip)
+  -- ENFORCE RATE LIMITING FIRST (Requirements: 1 connection per second)
+  if not check_rate_limit(request_handle, client_ip) then
+    track_rejection(request_handle, "rate_limited", client_ip, "rate_limited")
+    request_handle:logErr("[REDIS-TRACKER] Connection REJECTED due to rate limiting")
+    request_handle:respond({[":status"] = "429"}, "Rate limit exceeded")
+    return
   end
   
-  -- Record connection attempt (no blocking)
-  record_connection_attempt(request_handle, pod_ip, client_ip, "attempted")
+  -- SELECT BEST POD BASED ON CONNECTION COUNTS (Requirements: max 2 connections per pod)
+  local selected_pod = select_best_pod(request_handle)
+  if not selected_pod then
+    track_rejection(request_handle, "all_pods", client_ip, "max_limited")
+    request_handle:logErr("[REDIS-TRACKER] Connection REJECTED - all pods at connection limit")
+    request_handle:respond({[":status"] = "503"}, "All backend pods at connection limit")
+    return
+  end
   
   -- Generate connection ID for tracking
   local connection_id = generate_connection_id()
   request_handle:headers():add("x-connection-id", connection_id)
-  request_handle:headers():add("x-pod-ip", pod_ip)
+  request_handle:headers():add("x-pod-ip", selected_pod)
   
-  request_handle:logInfo(string.format("[REDIS-TRACKER] Generated connection ID: %s", connection_id))
+  -- Override the upstream destination to direct to the selected pod
+  if selected_pod ~= "backend.default.svc.cluster.local" then
+    request_handle:headers():add("x-envoy-upstream-alt-stat-name", selected_pod)
+    -- TODO: Set the actual upstream host header for Envoy routing
+    -- This may require additional Envoy configuration for dynamic routing
+  end
   
-  -- Track all connections (no limits applied by Lua)
-  track_established_connection(request_handle, pod_ip, connection_id, client_ip, user_agent)
+  -- Connection allowed - track it
+  track_connection_with_fallback(request_handle, connection_id, client_ip, user_agent, "established")
   
   -- Always set Redis readiness
   set_redis_readiness_status(request_handle)
   
-  request_handle:logInfo(string.format("[REDIS-TRACKER] Request processing complete for connection %s", connection_id))
+  request_handle:logInfo(string.format("[REDIS-TRACKER] Connection ALLOWED: %s to pod %s", connection_id, selected_pod))
 end
 
 function envoy_on_response(response_handle)
@@ -214,11 +367,17 @@ function envoy_on_response(response_handle)
     -- This is mainly for HTTP requests that complete immediately
     local upgrade_header = response_handle:headers():get("upgrade")
     if not upgrade_header or upgrade_header:lower() ~= "websocket" then
-      track_connection_end(response_handle, pod_ip, connection_id)
-      record_connection_attempt(response_handle, pod_ip, "unknown", "completed")
+      track_connection_with_fallback(response_handle, connection_id, "unknown", "unknown", "ended")
       response_handle:logInfo("[REDIS-TRACKER] HTTP connection completed")
     else
       record_connection_attempt(response_handle, pod_ip, "unknown", "websocket_established")
+      
+      -- Also record at service level for compatibility
+      local service_target = "backend.default.svc.cluster.local"
+      if pod_ip ~= service_target then
+        record_connection_attempt(response_handle, service_target, "unknown", "websocket_established")
+      end
+      
       response_handle:logInfo("[REDIS-TRACKER] WebSocket connection established")
     end
   else

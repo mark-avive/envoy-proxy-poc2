@@ -45,50 +45,28 @@ static_resources:
                   timeout: 0s
                   upgrade_configs:
                   - upgrade_type: "websocket"
+                  request_headers_to_add:
+                  - header:
+                      key: "x-upstream-host"
+                      value: "%UPSTREAM_HOST%"
+                    append: false
               - match:
                   prefix: "/"
                 route:
                   cluster: websocket_cluster
+                  request_headers_to_add:
+                  - header:
+                      key: "x-upstream-host"
+                      value: "%UPSTREAM_HOST%"
+                    append: false
           http_filters:
-          # Rate limiting filter
-          - name: envoy.filters.http.local_ratelimit
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-              stat_prefix: websocket_rate_limiter
-              token_bucket:
-                max_tokens: ${max_tokens}
-                tokens_per_fill: ${tokens_per_fill}
-                fill_interval: ${fill_interval}
-              filter_enabled:
-                runtime_key: rate_limit_enabled
-                default_value:
-                  numerator: 100
-                  denominator: HUNDRED
-              filter_enforced:
-                runtime_key: rate_limit_enforced
-                default_value:
-                  numerator: 100
-                  denominator: HUNDRED
-              response_headers_to_add:
-              - append: false
-                header:
-                  key: x-rate-limited
-                  value: 'true'
-          # Lua script for Redis connection tracking (tracking only - no limits)
+          # Lua script for Redis connection tracking and enforcement (ENFORCES LIMITS)
           - name: envoy.filters.http.lua
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
               default_source_code:
                 filename: "/etc/envoy/lua/redis-connection-tracker.lua"
-          # Circuit breaker for connection limiting
-          - name: envoy.filters.http.fault
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
-              abort:
-                percentage:
-                  numerator: 0
-                  denominator: HUNDRED
-                http_status: 503
+          # Router must be last
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
