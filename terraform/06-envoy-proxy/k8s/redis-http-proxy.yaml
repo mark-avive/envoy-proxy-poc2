@@ -49,14 +49,23 @@ spec:
                           content_length = int(self.headers['Content-Length'])
                           post_data = self.rfile.read(content_length).decode('utf-8')
                           
-                          # Parse Redis command
-                          parts = post_data.strip().split()
+                          # Log the incoming request for debugging
+                          print(f'[DEBUG] Received Redis command: {post_data}')
+                          
+                          # Parse Redis command with proper quote handling
+                          import shlex
+                          try:
+                              parts = shlex.split(post_data.strip())
+                          except ValueError:
+                              # Fallback to simple split if shlex fails
+                              parts = post_data.strip().split()
+                              
                           if not parts:
                               self.send_error(400, 'Empty command')
                               return
                           
                           command = parts[0].upper()
-                          args = [p.strip('\"') for p in parts[1:]]
+                          args = parts[1:]
                           
                           # Execute Redis command
                           if command == 'SET':
@@ -105,16 +114,12 @@ spec:
                               return
                           
                           self.send_response(200)
-                          self.send_header('Content-type', 'text/plain')
+                          self.send_header('Content-type', 'application/json')
                           self.end_headers()
                           
-                          # Handle different result types
-                          if isinstance(result, list):
-                              # Convert list results to JSON for complex responses
-                              import json
-                              self.wfile.write(json.dumps(result).encode('utf-8'))
-                          else:
-                              self.wfile.write(str(result).encode('utf-8'))
+                          # Return JSON response for all commands
+                          response = {'result': result}
+                          self.wfile.write(json.dumps(response).encode('utf-8'))
                           
                       except Exception as e:
                           self.send_error(500, f'Redis error: {str(e)}')

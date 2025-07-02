@@ -35,7 +35,7 @@ spec:
           protocol: TCP
         env:
         - name: REDIS_HOST
-          value: "redis-service.default.svc.cluster.local"
+          value: "redis-connection-tracker.default.svc.cluster.local"
         - name: REDIS_PORT
           value: "6379"
         - name: HOSTNAME

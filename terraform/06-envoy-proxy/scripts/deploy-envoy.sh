@@ -49,10 +49,52 @@ sed -i "s/\${ALB_SECURITY_GROUP_ID}/$ALB_SG/g" "$TEMP_MANIFEST"
 
 echo "Deployment manifest prepared: $TEMP_MANIFEST"
 
+# Deploy Redis components first (required for connection tracking)
+echo "Deploying Redis components for connection tracking..."
+
+# Deploy Redis connection tracker (data store)
+echo "Deploying Redis connection tracker..."
+kubectl apply -f "$K8S_DIR/redis-deployment.yaml"
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to deploy Redis connection tracker"
+    rm -f "$TEMP_MANIFEST"
+    exit 1
+fi
+
+# Deploy Redis HTTP proxy (for Lua script communication)
+echo "Deploying Redis HTTP proxy..."
+kubectl apply -f "$K8S_DIR/redis-http-proxy.yaml"
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to deploy Redis HTTP proxy"
+    rm -f "$TEMP_MANIFEST"
+    exit 1
+fi
+
+# Wait for Redis services to be ready
+echo "Waiting for Redis services to be ready..."
+kubectl wait --for=condition=available --timeout=120s deployment/redis-connection-tracker
+kubectl wait --for=condition=available --timeout=120s deployment/redis-http-proxy
+if [ $? -ne 0 ]; then
+    echo "Warning: Redis services did not become ready within 2 minutes"
+    kubectl get pods -l app=redis-connection-tracker
+    kubectl get pods -l app=redis-http-proxy
+else
+    echo "✓ Redis services are ready"
+fi
+
 # Deploy to Kubernetes
 echo "Deploying Envoy proxy to Kubernetes..."
 
-# First apply the ConfigMap with templated configuration
+# Apply the Lua scripts ConfigMap
+echo "Applying Lua scripts configuration..."
+kubectl create configmap envoy-lua-scripts --from-file=redis-connection-tracker.lua="$K8S_DIR/redis-connection-tracker.lua" --dry-run=client -o yaml | kubectl apply -f -
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to apply Lua scripts configuration"
+    rm -f "$TEMP_MANIFEST"
+    exit 1
+fi
+
+# Apply the Envoy configuration ConfigMap
 echo "Applying templated Envoy configuration..."
 kubectl create configmap envoy-config --from-file=envoy.yaml="$K8S_DIR/envoy-config.yaml" --dry-run=client -o yaml | kubectl apply -f -
 if [ $? -ne 0 ]; then

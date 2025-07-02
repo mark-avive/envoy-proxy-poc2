@@ -28,7 +28,7 @@ spec:
           protocol: TCP
         env:
         - name: ENVOY_ENDPOINT
-          value: "ws://envoy-proxy-service.${namespace}.svc.cluster.local:8080"
+          value: "${envoy_endpoint}"
         - name: CLIENT_ID
           valueFrom:
             fieldRef:

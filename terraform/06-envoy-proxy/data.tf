@@ -53,3 +53,13 @@ data "kubernetes_endpoints_v1" "server_endpoints" {
   
   depends_on = [data.terraform_remote_state.server_app]
 }
+
+# Get ingress information for ALB endpoint
+data "kubernetes_ingress_v1" "envoy_proxy_ingress" {
+  metadata {
+    name      = "envoy-proxy-ingress"
+    namespace = local.namespace
+  }
+  
+  depends_on = [null_resource.deploy_envoy]
+}

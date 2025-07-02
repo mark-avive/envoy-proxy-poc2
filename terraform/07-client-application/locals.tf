@@ -27,6 +27,9 @@ locals {
   service_name = "envoy-poc-client-service"
   service_port = 8081
   
+  # Envoy Proxy Configuration (from remote state)
+  envoy_endpoint = data.terraform_remote_state.envoy_proxy.outputs.envoy_websocket_endpoint
+  
   # Resource Limits (from requirements)
   cpu_request    = "50m"
   memory_request = "64Mi"

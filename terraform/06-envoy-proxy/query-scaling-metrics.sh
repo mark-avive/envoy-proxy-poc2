@@ -18,13 +18,14 @@ redis_exec() {
 check_redis_readiness() {
     echo "🔍 Checking Redis readiness status..."
     
-    local connected=$(redis_exec GET "redis:status:connected" 2>/dev/null || echo "false")
-    local ready_for_scaling=$(redis_exec GET "redis:status:ready_for_scaling" 2>/dev/null || echo "false")
+    # Check if Redis is responding and has our connection tracking keys
+    local redis_ping=$(redis_exec PING 2>/dev/null || echo "FAILED")
+    local has_data=$(redis_exec KEYS "ws:*" 2>/dev/null | wc -l)
     
-    echo "   Redis Connected: $connected"
-    echo "   Ready for Scaling: $ready_for_scaling"
+    echo "   Redis Connected: $([[ "$redis_ping" == "PONG" ]] && echo "true" || echo "false")"
+    echo "   Ready for Scaling: $([[ $has_data -gt 0 ]] && echo "true" || echo "false")"
     
-    if [[ "$ready_for_scaling" == "true" ]]; then
+    if [[ "$redis_ping" == "PONG" ]] && [[ $has_data -gt 0 ]]; then
         echo "✅ Redis data is ready for scaling decisions"
         return 0
     else
@@ -39,8 +40,8 @@ get_pod_connections() {
     echo "📊 Current Pod Connection Counts:"
     echo "=================================="
     
-    # Get all pod connection keys
-    local pod_keys=$(redis_exec KEYS "pod:established_count:*" 2>/dev/null)
+    # Get all pod connection keys (our implementation uses ws:pod_conn:*)
+    local pod_keys=$(redis_exec KEYS "ws:pod_conn:*" 2>/dev/null)
     
     if [[ -z "$pod_keys" ]]; then
         echo "   No pod connection data found"
@@ -49,9 +50,9 @@ get_pod_connections() {
     
     echo "$pod_keys" | while IFS= read -r key; do
         if [[ -n "$key" ]]; then
-            local pod_ip=$(echo "$key" | sed 's/pod:established_count://')
+            local pod_ip=$(echo "$key" | sed 's/ws:pod_conn://')
             local count=$(redis_exec GET "$key" 2>/dev/null || echo "0")
-            printf "   %-20s: %2d connections\n" "$pod_ip" "$count"
+            printf "   %-40s: %2d connections\n" "$pod_ip" "$count"
         fi
     done
 }
@@ -59,40 +60,53 @@ get_pod_connections() {
 # Function to get rejection statistics
 get_rejection_stats() {
     echo ""
-    echo "🚫 Connection Rejection Statistics (Last 5 minutes):"
-    echo "===================================================="
+    echo "🚫 Connection Rejection Statistics:"
+    echo "==================================="
     
-    # Rate limit rejections
+    # Total rejected connections (our implementation)
+    local total_rejected=$(redis_exec GET "ws:rejected" 2>/dev/null || echo "0")
+    echo "   Total Rejected Connections: $total_rejected"
+    
+    # Rate limiting windows (current implementation)
     echo ""
-    echo "Rate Limit Rejections:"
-    local rate_limit_keys=$(redis_exec KEYS "rate_limit_rejections:5m:*" 2>/dev/null || echo "")
-    if [[ -n "$rate_limit_keys" ]]; then
-        echo "$rate_limit_keys" | while read -r key; do
-            if [[ -n "$key" ]]; then
-                local pod_ip=$(echo "$key" | sed 's/rate_limit_rejections:5m://')
-                local count=$(redis_exec ZCARD "$key" 2>/dev/null || echo "0")
-                printf "   %-20s: %2d rejections\n" "$pod_ip" "$count"
-            fi
-        done
-    else
-        echo "   No rate limit rejections found"
+    echo "Rate Limiting Windows (Last 5 minutes):"
+    local current_minute=$(date +%s)
+    current_minute=$((current_minute / 60))
+    
+    local total_rate_limited=0
+    for i in {0..4}; do
+        local minute=$((current_minute - i))
+        local key="ws:rate_limit:$minute"
+        local count=$(redis_exec GET "$key" 2>/dev/null || echo "0")
+        if [[ $count -gt 0 ]]; then
+            local minute_time=$(date -d "@$((minute * 60))" +"%H:%M")
+            printf "   %-10s: %2d requests\n" "$minute_time" "$count"
+            total_rate_limited=$((total_rate_limited + count))
+        fi
+    done
+    
+    echo ""
+    echo "   Total Rate Limited (5 min): $total_rate_limited"
+}
+
+# Function to show all Redis data for debugging
+show_all_redis_data() {
+    echo ""
+    echo "🔍 All Redis Data (Debug Information):"
+    echo "====================================="
+    
+    local all_keys=$(redis_exec KEYS "*" 2>/dev/null)
+    if [[ -z "$all_keys" ]]; then
+        echo "   No Redis keys found"
+        return
     fi
     
-    # Max limit rejections
-    echo ""
-    echo "Max Connection Limit Rejections:"
-    local max_limit_keys=$(redis_exec KEYS "max_limit_rejections:5m:*" 2>/dev/null || echo "")
-    if [[ -n "$max_limit_keys" ]]; then
-        echo "$max_limit_keys" | while read -r key; do
-            if [[ -n "$key" ]]; then
-                local pod_ip=$(echo "$key" | sed 's/max_limit_rejections:5m://')
-                local count=$(redis_exec ZCARD "$key" 2>/dev/null || echo "0")
-                printf "   %-20s: %2d rejections\n" "$pod_ip" "$count"
-            fi
-        done
-    else
-        echo "   No max limit rejections found"
-    fi
+    echo "$all_keys" | while IFS= read -r key; do
+        if [[ -n "$key" ]]; then
+            local value=$(redis_exec GET "$key" 2>/dev/null || echo "N/A")
+            printf "   %-40s: %s\n" "$key" "$value"
+        fi
+    done
 }
 
 # Function to get scaling recommendations
@@ -216,6 +230,9 @@ main() {
     # Check readiness status
     check_redis_readiness
     
+    # Show debug information first
+    show_all_redis_data
+    
     # Get all metrics
     get_pod_connections
     get_rejection_stats
@@ -253,6 +270,9 @@ case "${1:-}" in
         ;;
     "readiness")
         check_redis_readiness
+        ;;
+    "debug")
+        show_all_redis_data
         ;;
     *)
         main

@@ -1,6 +1,9 @@
 -- Enhanced Redis Connection Tracker with Direct Redis Access
 -- Following multi-envoy sample architecture for proper distributed state management
 
+-- Import JSON library for parsing HTTP responses
+local cjson = require("cjson")
+
 -- Redis configuration
 local REDIS_CONFIG = {
     HOST = os.getenv("REDIS_HOST") or "redis-connection-tracker.default.svc.cluster.local",
@@ -42,7 +45,7 @@ function redis_http_call(handle, command)
     }
     
     local response_headers, response_body = handle:httpCall(
-        "redis_http_proxy",  -- Match the cluster name in envoy config
+        "redis_http_proxy_cluster",  -- Match the cluster name in envoy config
         headers,
         command,
         1000  -- 1 second timeout
@@ -84,22 +87,27 @@ function redis_atomic_check_and_increment(handle, pod_id, max_connections)
     escaped_script = string.gsub(escaped_script, "\t", "\\t")
     local command = string.format('EVAL "%s" 1 "%s" %d', escaped_script, key, max_connections)
     
-    local result_json, err = redis_http_call(handle, command)
-    if not result_json then
+    local result_str, err = redis_http_call(handle, command)
+    if not result_str then
         handle:logErr("[REDIS-TRACKER] Redis HTTP call failed: " .. (err or "unknown error"))
         return false, 0, "Redis HTTP call failed"
     end
     
-    -- Parse JSON response from HTTP proxy
-    local json = require("cjson")
-    local success, result = pcall(json.decode, result_json)
-    if not success or not result or type(result) ~= "table" or #result < 3 then
-        handle:logErr("[REDIS-TRACKER] Invalid Redis response: " .. tostring(result_json))
+    -- Parse JSON response: {"result": [true, 1, "success"]} or {"result": [false, 0, "limit_exceeded"]}
+    local ok, response = pcall(cjson.decode, result_str)
+    if not ok or not response.result then
+        handle:logErr("[REDIS-TRACKER] Invalid JSON response: " .. tostring(result_str))
+        return false, 0, "Invalid JSON response"
+    end
+    
+    local result = response.result
+    if #result < 3 then
+        handle:logErr("[REDIS-TRACKER] Invalid Redis result: " .. tostring(result_str))
         return false, 0, "Invalid Redis response"
     end
     
-    local allowed = result[1]
-    local count = result[2] 
+    local allowed = (result[1] == true or result[1] == "true" or result[1] == "True")
+    local count = tonumber(result[2]) or 0
     local status = result[3]
     
     return allowed, count, status
@@ -126,32 +134,56 @@ function redis_atomic_decrement(handle, pod_id)
     
     local result, err = redis_http_call(handle, command)
     if result then
-        local count = tonumber(result) or 0
-        handle:logInfo(string.format("[REDIS-TRACKER] Decremented connections for pod %s to %d", pod_id, count))
-        return true
+        -- Parse JSON response for EVAL command
+        local ok, response = pcall(cjson.decode, result)
+        if ok and response.result then
+            local count = tonumber(response.result) or 0
+            handle:logInfo(string.format("[REDIS-TRACKER] Decremented connections for pod %s to %d", pod_id, count))
+            return true
+        else
+            handle:logErr("[REDIS-TRACKER] Invalid JSON response from decrement: " .. tostring(result))
+            return false
+        end
     else
         handle:logErr("[REDIS-TRACKER] Failed to decrement pod connections: " .. (err or "unknown error"))
         return false
     end
 end
 
--- Distributed rate limiting with Redis
+-- Distributed atomic rate limiting with Redis (based on multi-envoy sample)
 function redis_check_rate_limit(handle, requests_per_minute)
     local current_minute = math.floor(os.time() / 60)
     local key = string.format(REDIS_KEYS.RATE_LIMIT_WINDOW, current_minute)
     
-    -- Increment and set expiration via HTTP calls
-    local incr_result, err = redis_http_call(handle, string.format('INCR "%s"', key))
-    if not incr_result then
-        handle:logWarn("[REDIS-TRACKER] Redis unavailable for rate limiting, allowing request")
+    -- Use Redis Lua script for atomic increment + expire in single operation
+    local lua_script = [[
+        local key = KEYS[1]
+        local current = redis.call('INCR', key)
+        if current == 1 then
+            redis.call('EXPIRE', key, 60)
+        end
+        return current
+    ]]
+    
+    local escaped_script = string.gsub(lua_script, "\n", "\\n")
+    escaped_script = string.gsub(escaped_script, "\t", "\\t")
+    local command = string.format('EVAL "%s" 1 "%s"', escaped_script, key)
+    
+    local result, err = redis_http_call(handle, command)
+    if not result then
+        handle:logWarn("[REDIS-TRACKER] Redis unavailable for rate limiting, allowing request (fail-open)")
         return false  -- Fail open for rate limiting
     end
     
-    -- Set expiration for the key
-    redis_http_call(handle, string.format('EXPIRE "%s" 60', key))
+    -- Parse the atomic increment result
+    local current_count = parse_redis_response(result, 0)
+    local is_limited = current_count > requests_per_minute
     
-    local current_count = tonumber(incr_result) or 0
-    return current_count > requests_per_minute
+    if is_limited then
+        handle:logWarn(string.format("[REDIS-TRACKER] Rate limit exceeded: %d requests in current minute (limit: %d)", current_count, requests_per_minute))
+    end
+    
+    return is_limited
 end
 
 -- Enhanced WebSocket detection
@@ -201,7 +233,7 @@ function envoy_on_request(request_handle)
     
     request_handle:logInfo("[REDIS-TRACKER] Processing WebSocket upgrade request")
     
-    -- Global distributed rate limiting check
+    -- Global distributed rate limiting check only
     if redis_check_rate_limit(request_handle, CONFIG.RATE_LIMIT_REQUESTS) then
         request_handle:logWarn("[REDIS-TRACKER] Global rate limit exceeded")
         increment_counter(request_handle, REDIS_KEYS.REJECTED_CONNECTIONS)
@@ -212,82 +244,114 @@ function envoy_on_request(request_handle)
         return
     end
     
-    -- Get target pod for this request
-    local pod_id = get_pod_id_from_upstream(request_handle)
-    
-    -- ATOMIC check-and-increment to prevent race conditions
-    local allowed, count, status = redis_atomic_check_and_increment(request_handle, pod_id, CONFIG.MAX_CONNECTIONS_PER_POD)
-    
-    if not allowed then
-        request_handle:logWarn(string.format(
-            "[REDIS-TRACKER] Pod %s connection rejected: %d/%d (%s)",
-            pod_id, count, CONFIG.MAX_CONNECTIONS_PER_POD, status
-        ))
-        increment_counter(request_handle, REDIS_KEYS.REJECTED_CONNECTIONS)
-        request_handle:respond(
-            {[":status"] = "503", ["content-type"] = "text/plain"},
-            "Pod connection limit exceeded"
-        )
-        return
-    end
-    
-    request_handle:logInfo(string.format(
-        "[REDIS-TRACKER] WebSocket upgrade ATOMICALLY reserved for pod %s (%d/%d connections)",
-        pod_id, count, CONFIG.MAX_CONNECTIONS_PER_POD
-    ))
-    
-    -- Store pod_id for cleanup on connection termination
-    request_handle:headers():add("x-reserved-pod-id", pod_id)
+    request_handle:logInfo("[REDIS-TRACKER] Request passed rate limiting, proceeding to upstream")
 end
 
--- Enhanced response handler with cleanup logic
+-- Enhanced response handler with proper atomic connection tracking
 function envoy_on_response(request_handle)
     local response_headers = request_handle:headers()
     local status = response_headers:get(":status")
-    local pod_id = request_handle:headers():get("x-reserved-pod-id")
     
-    if not pod_id then
-        pod_id = get_pod_id_from_upstream(request_handle)
+    -- Only track WebSocket upgrade requests
+    if not is_websocket_upgrade(request_handle:headers()) then
+        return
     end
     
-    if status == "101" then  -- WebSocket upgrade successful
-        if pod_id then
-            -- Update global connection counter (the pod connection was already incremented atomically)
+    request_handle:logInfo(string.format("[REDIS-TRACKER] Response status: %s", status or "unknown"))
+    
+    -- Get upstream pod information (multiple methods)
+    local pod_id = nil
+    local upstream_host = nil
+    
+    -- Method 1: Try to get from response headers (set by Envoy)
+    local x_upstream_host = response_headers:get("x-upstream-host")
+    if x_upstream_host and x_upstream_host ~= "" then
+        upstream_host = x_upstream_host
+        pod_id = string.match(upstream_host, "([^:]+)")
+        request_handle:logInfo(string.format("[REDIS-TRACKER] Got upstream from headers: %s, Pod ID: %s", upstream_host, pod_id or "unknown"))
+    else
+        -- Method 2: Try streamInfo (might not be available in all Envoy versions)
+        local stream_info = request_handle:streamInfo()
+        if stream_info and stream_info.upstreamHost then
+            upstream_host = stream_info.upstreamHost
+            pod_id = string.match(upstream_host, "([^:]+)")
+            request_handle:logInfo(string.format("[REDIS-TRACKER] Got upstream from streamInfo: %s, Pod ID: %s", upstream_host, pod_id or "unknown"))
+        else
+            request_handle:logWarn("[REDIS-TRACKER] Could not determine upstream host from headers or streamInfo")
+        end
+    end
+    
+    if not pod_id then
+        request_handle:logWarn("[REDIS-TRACKER] No pod ID available, using service-level tracking")
+        pod_id = "backend.default.svc.cluster.local"
+    end
+    
+    if status == "101" and pod_id then  -- WebSocket upgrade successful
+        -- CRITICAL: Use atomic check-and-increment to prevent race conditions
+        local allowed, count, status_msg = redis_atomic_check_and_increment(request_handle, pod_id, CONFIG.MAX_CONNECTIONS_PER_POD)
+        
+        if allowed then
+            request_handle:logInfo(string.format(
+                "[REDIS-TRACKER] WebSocket established to pod %s: %d/%d connections (%s)",
+                pod_id, count, CONFIG.MAX_CONNECTIONS_PER_POD, status_msg
+            ))
+            
+            -- Increment global connection counter atomically
             increment_counter(request_handle, REDIS_KEYS.GLOBAL_CONNECTIONS)
             
-            request_handle:logInfo(string.format(
-                "[REDIS-TRACKER] WebSocket established to pod %s (connection already counted atomically)",
-                pod_id
-            ))
-        end
-    else
-        -- WebSocket upgrade failed - need to decrement the reserved connection
-        if pod_id and status and status ~= "101" then
+            -- Store pod_id in response headers for cleanup tracking
+            response_headers:add("x-tracked-pod-id", pod_id)
+        else
             request_handle:logWarn(string.format(
-                "[REDIS-TRACKER] WebSocket upgrade failed (status %s) - releasing reserved connection for pod %s",
-                status, pod_id
+                "[REDIS-TRACKER] Pod %s connection rejected: %d/%d (%s)",
+                pod_id, count, CONFIG.MAX_CONNECTIONS_PER_POD, status_msg
             ))
-            redis_atomic_decrement(request_handle, pod_id)
+            increment_counter(request_handle, REDIS_KEYS.REJECTED_CONNECTIONS)
+            -- Note: Connection already established at this point, tracking for monitoring
         end
+    elseif status and (status:match("^4%d%d") or status:match("^5%d%d")) then
+        -- Track failed connections for monitoring
+        request_handle:logInfo(string.format("[REDIS-TRACKER] WebSocket upgrade failed with status %s", status))
+        increment_counter(request_handle, REDIS_KEYS.REJECTED_CONNECTIONS)
     end
 end
 
--- Connection termination handler (for cleanup when WebSocket closes)
+-- Connection termination handler (atomic cleanup when WebSocket closes)
 function envoy_on_stream_done(request_handle)
-    local pod_id = request_handle:headers():get("x-reserved-pod-id")
-    if not pod_id then
-        pod_id = get_pod_id_from_upstream(request_handle)
-    end
+    -- Check if this was a tracked WebSocket connection
+    local response_headers = request_handle:headers()
+    local tracked_pod_id = response_headers:get("x-tracked-pod-id")
     
-    if pod_id then
+    if tracked_pod_id then
+        -- Use the tracked pod ID for accurate cleanup
         request_handle:logInfo(string.format(
-            "[REDIS-TRACKER] WebSocket connection closed - decrementing count for pod %s",
-            pod_id
+            "[REDIS-TRACKER] WebSocket connection closed - atomically decrementing count for tracked pod %s",
+            tracked_pod_id
         ))
-        redis_atomic_decrement(request_handle, pod_id)
+        redis_atomic_decrement(request_handle, tracked_pod_id)
         
-        -- Decrement global counter
+        -- Atomically decrement global counter
         redis_http_call(request_handle, string.format('DECR "%s"', REDIS_KEYS.GLOBAL_CONNECTIONS))
+    else
+        -- Fallback: Try to get pod ID from upstream host (may not always work)
+        local stream_info = request_handle:streamInfo()
+        local upstream_host = stream_info:upstreamHost()
+        
+        if upstream_host then
+            local pod_id = string.match(upstream_host, "([^:]+)")
+            if pod_id then
+                request_handle:logInfo(string.format(
+                    "[REDIS-TRACKER] WebSocket connection closed - decrementing count for pod %s (fallback)",
+                    pod_id
+                ))
+                redis_atomic_decrement(request_handle, pod_id)
+                redis_http_call(request_handle, string.format('DECR "%s"', REDIS_KEYS.GLOBAL_CONNECTIONS))
+            else
+                request_handle:logWarn("[REDIS-TRACKER] Could not determine pod ID for connection cleanup")
+            end
+        else
+            request_handle:logWarn("[REDIS-TRACKER] No upstream host available for connection cleanup")
+        end
     end
 end
 
@@ -299,10 +363,29 @@ function increment_counter(handle, key)
     end
 end
 
+-- Helper function to parse JSON response from Redis HTTP calls
+function parse_redis_response(response_str, default_value)
+    default_value = default_value or 0
+    if not response_str then
+        return default_value
+    end
+    
+    local ok, response = pcall(cjson.decode, response_str)
+    if ok and response.result then
+        return tonumber(response.result) or default_value
+    else
+        return default_value
+    end
+end
+
 -- Metrics handler for multi-proxy aggregation
 function handle_metrics_request(request_handle)
     local global_active, err1 = redis_http_call(request_handle, string.format('GET "%s"', REDIS_KEYS.GLOBAL_CONNECTIONS))
     local global_rejected, err2 = redis_http_call(request_handle, string.format('GET "%s"', REDIS_KEYS.REJECTED_CONNECTIONS))
+    
+    -- Parse JSON responses
+    local active_count = parse_redis_response(global_active, 0)
+    local rejected_count = parse_redis_response(global_rejected, 0)
     
     if not global_active or not global_rejected then
         request_handle:respond(
@@ -311,9 +394,6 @@ function handle_metrics_request(request_handle)
         )
         return
     end
-    
-    global_active = tonumber(global_active) or 0
-    global_rejected = tonumber(global_rejected) or 0
     
     local metrics = string.format([[
 # HELP websocket_connections_active_total Total active WebSocket connections (all proxies)
@@ -327,7 +407,7 @@ websocket_connections_rejected_total %d
 # HELP websocket_proxy_instance Instance identifier
 # TYPE websocket_proxy_instance gauge
 websocket_proxy_instance{proxy_id="%s"} 1
-]], global_active, global_rejected, CONFIG.PROXY_ID)
+]], active_count, rejected_count, CONFIG.PROXY_ID)
     
     request_handle:respond(
         {[":status"] = "200", ["content-type"] = "text/plain; charset=utf-8"},

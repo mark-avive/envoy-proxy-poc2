@@ -42,6 +42,19 @@ output "backend_service_name" {
   value       = local.backend_service_name
 }
 
+# ALB Endpoint for Client Applications
+output "envoy_alb_endpoint" {
+  description = "ALB endpoint for WebSocket connections"
+  value       = data.kubernetes_ingress_v1.envoy_proxy_ingress.status[0].load_balancer[0].ingress[0].hostname
+  depends_on  = [null_resource.deploy_envoy]
+}
+
+output "envoy_websocket_endpoint" {
+  description = "Complete WebSocket endpoint URL for client applications"
+  value       = "ws://${data.kubernetes_ingress_v1.envoy_proxy_ingress.status[0].load_balancer[0].ingress[0].hostname}:80"
+  depends_on  = [null_resource.deploy_envoy]
+}
+
 # Deployment Configuration
 output "envoy_replicas" {
   description = "Number of Envoy proxy replicas"

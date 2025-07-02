@@ -19,6 +19,7 @@ resource "local_file" "deployment_yaml" {
     container_port       = local.container_port
     service_name         = local.service_name
     service_port         = local.service_port
+    envoy_endpoint       = local.envoy_endpoint
     max_connections      = local.max_connections
     connection_interval  = local.connection_interval
     message_interval_min = local.message_interval_min
