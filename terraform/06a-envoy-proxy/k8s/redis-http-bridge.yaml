@@ -1,0 +1,97 @@
+# Simple HTTP-to-Redis Bridge for Lua Scripts
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-http-bridge
+  namespace: default
+  labels:
+    app: redis-http-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-http-bridge
+  template:
+    metadata:
+      labels:
+        app: redis-http-bridge
+    spec:
+      containers:
+      - name: redis-bridge
+        image: python:3.9-slim
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: REDIS_HOST
+          value: "redis-atomic-service"
+        - name: REDIS_PORT
+          value: "6379"
+        command: ["sh", "-c"]
+        args:
+        - |
+          pip install aiohttp redis && python3 -c "
+          import asyncio
+          import redis
+          import os
+          from aiohttp import web
+          
+          redis_client = redis.Redis(
+              host=os.getenv('REDIS_HOST', 'localhost'),
+              port=int(os.getenv('REDIS_PORT', '6379')),
+              decode_responses=True
+          )
+          
+          async def handle_redis_command(request):
+              try:
+                  body = await request.text()
+                  parts = body.strip().split()
+                  
+                  if not parts:
+                      return web.Response(text='Empty command', status=400)
+                  
+                  result = redis_client.execute_command(*parts)
+                  return web.Response(text=str(result))
+              
+              except Exception as e:
+                  return web.Response(text=f'Error: {str(e)}', status=500)
+          
+          async def health_check(request):
+              try:
+                  redis_client.ping()
+                  return web.Response(text='OK')
+              except:
+                  return web.Response(text='Redis unavailable', status=503)
+          
+          app = web.Application()
+          app.router.add_post('/redis-cmd', handle_redis_command)
+          app.router.add_get('/health', health_check)
+          
+          web.run_app(app, host='0.0.0.0', port=8080)
+          "
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-http-bridge-service
+  namespace: default
+  labels:
+    app: redis-http-bridge
+spec:
+  selector:
+    app: redis-http-bridge
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  type: ClusterIP

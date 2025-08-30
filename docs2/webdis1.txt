@@ -1,0 +1,257 @@
+Webdis
+A fast HTTP interface for Redis
+
+ + 
+Features
+Simple HTTP
+JSON(P) output, and other formats
+Chunked pub/sub
+Access Control by IP+mask or HTTP Auth
+And more...
+Install
+$ git clone git://github.com/nicolasff/webdis.git
+		
+$ cd webdis
+
+$ make
+
+$ ./webdis &
+Follow Webdis on github.
+HTTP
+Webdis is a simple HTTP server which forwards commands to Redis and sends the reply back using a format of your choice. Accessing /COMMAND/arg0/arg1/.../argN[.ext] on Webdis executes the command on Redis and returns the response; the reply format can be changed with the optional extension (.json, .txt…)
+
+Return codes:
+Successful requests are sent with 200 OK.
+Webdis adds ETags when possible, and uses 304 Not Modified when If-None-Match is sent with the same ETag.
+If the ACL forbids the use of a command, Webdis replies with 403 Forbidden.
+Verbs other than GET,POST,OPTIONS trigger a 405 Method Not Allowed.
+
+File upload with PUT:
+Because the URI format is quite limited, Webdis can read its last argument from a file when it is sent using HTTP PUT. To do this with cURL, use curl --upload-file my-data.bin http://127.0.0.1:7379/SET/my-key. Note how the SET command has only one parameter instead of two, the last one being the file’s data.
+
+to the top
+JSON(P) and friends
+By default, Webdis replies are JSON objects containing a single item, mapping the requested command name to the Redis reply. The following JSON types are used:
+Redis string → JSON string (GET, LPOP...)
+Redis multi-bulk data → JSON list (LRANGE, SMEMBERS...)
+Redis integer → JSON integer (INCR...)
+Redis status, error → list [bool, string] (PING, SET...)
+The ?jsonp query string parameter adds an optional wrapping function, transforming the reply into a JSONP call. This makes it possible to include Webdis in Javascript apps.
+
+A few other formats are supported:
+Text with the .txt extension, served as text/plain. Only strings are returned.
+HTML, XML, PNG, JPEG, PDF served with their extensions.
+MessagePack .msg extension, served as application/x-msgpack.
+Raw Redis protocol with the .raw extension.
+For unsupported file formats, the ?type= query string parameter allows you to serve strings as any content-type.
+to the top
+Publish, subscribe
+Webdis exposes Redis PUB/SUB channels to HTTP clients, forwarding messages in the channel as they are published by Redis. This is done using chunked transfer encoding.
+
+Webdis also provides HTML5 WebSocket access to pub/sub channels.
+to the top
+Access control
+Because some Redis commands can write data, exposing Webdis to clients on the web might not be a good idea. Fortunately, an ACL system matches a profile type to a list of permissions. Each access control setting can match clients by IP + range, by HTTP Auth, or by both, and lists the commands they are able and unable to execute.
+This lets you disable write commands for the public, whilst still keeping a full access from your network.
+
+	"acl": [
+		{
+			"disabled":	["SET", "DEBUG", "FLUSHDB", "FLUSHALL"]
+		},
+
+		{
+			"ip":		"192.168.0.0/16",
+			"enabled":	["SET"]
+		},
+
+		{
+			"http_basic_auth":	"root:p4ssw0rd1",
+			"enabled":		["FLUSHDB"]
+		}
+	]
+to the top
+More!
+Also supported:
+HTTP Pipelining
+Connections to Redis using TCP or UNIX sockets
+Restricted user/group
+Logs, contributed by Michael Bernstein
+Cross-Origin Request Sharing (CORS) for XmlHttpRequest2
+Daemonize on start
+to the top
+Webdis is © Nicolas Favre-Felix, distributed under the 2-clause BSD License.
+
+HTTP
+Webdis is a simple HTTP server which forwards commands to Redis and sends the reply back using a format of your choice. Accessing /COMMAND/arg0/arg1/.../argN[.ext] on Webdis executes the command on Redis and returns the response; the reply format can be changed with the optional extension (.json, .txt…)
+
+Return codes:
+Successful requests are sent with 200 OK.
+Webdis adds ETags when possible, and uses 304 Not Modified when If-None-Match is sent with the same ETag.
+If the ACL forbids the use of a command, Webdis replies with 403 Forbidden.
+Verbs other than GET,POST,OPTIONS trigger a 405 Method Not Allowed.
+
+File upload with PUT:
+Because the URI format is quite limited, Webdis can read its last argument from a file when it is sent using HTTP PUT. To do this with cURL, use curl --upload-file my-data.bin http://127.0.0.1:7379/SET/my-key. Note how the SET command has only one parameter instead of two, the last one being the file’s data.
+
+to the top
+JSON(P) and friends
+By default, Webdis replies are JSON objects containing a single item, mapping the requested command name to the Redis reply. The following JSON types are used:
+Redis string → JSON string (GET, LPOP...)
+Redis multi-bulk data → JSON list (LRANGE, SMEMBERS...)
+Redis integer → JSON integer (INCR...)
+Redis status, error → list [bool, string] (PING, SET...)
+The ?jsonp query string parameter adds an optional wrapping function, transforming the reply into a JSONP call. This makes it possible to include Webdis in Javascript apps.
+
+A few other formats are supported:
+Text with the .txt extension, served as text/plain. Only strings are returned.
+HTML, XML, PNG, JPEG, PDF served with their extensions.
+MessagePack .msg extension, served as application/x-msgpack.
+Raw Redis protocol with the .raw extension.
+For unsupported file formats, the ?type= query string parameter allows you to serve strings as any content-type.
+to the top
+Publish, subscribe
+Webdis exposes Redis PUB/SUB channels to HTTP clients, forwarding messages in the channel as they are published by Redis. This is done using chunked transfer encoding.
+
+Webdis also provides HTML5 WebSocket access to pub/sub channels.
+to the top
+Access control
+Because some Redis commands can write data, exposing Webdis to clients on the web might not be a good idea. Fortunately, an ACL system matches a profile type to a list of permissions. Each access control setting can match clients by IP + range, by HTTP Auth, or by both, and lists the commands they are able and unable to execute.
+This lets you disable write commands for the public, whilst still keeping a full access from your network.
+
+	"acl": [
+		{
+			"disabled":	["SET", "DEBUG", "FLUSHDB", "FLUSHALL"]
+		},
+
+		{
+			"ip":		"192.168.0.0/16",
+			"enabled":	["SET"]
+		},
+
+		{
+			"http_basic_auth":	"root:p4ssw0rd1",
+			"enabled":		["FLUSHDB"]
+		}
+	]
+to the top
+More!
+Also supported:
+HTTP Pipelining
+Connections to Redis using TCP or UNIX sockets
+Restricted user/group
+Logs, contributed by Michael Bernstein
+Cross-Origin Request Sharing (CORS) for XmlHttpRequest2
+Daemonize on Strategy
+
+JSON(P) and friends
+By default, Webdis replies are JSON objects containing a single item, mapping the requested command name to the Redis reply. The following JSON types are used:
+Redis string → JSON string (GET, LPOP...)
+Redis multi-bulk data → JSON list (LRANGE, SMEMBERS...)
+Redis integer → JSON integer (INCR...)
+Redis status, error → list [bool, string] (PING, SET...)
+The ?jsonp query string parameter adds an optional wrapping function, transforming the reply into a JSONP call. This makes it possible to include Webdis in Javascript apps.
+
+A few other formats are supported:
+Text with the .txt extension, served as text/plain. Only strings are returned.
+HTML, XML, PNG, JPEG, PDF served with their extensions.
+MessagePack .msg extension, served as application/x-msgpack.
+Raw Redis protocol with the .raw extension.
+For unsupported file formats, the ?type= query string parameter allows you to serve strings as any content-type.
+to the top
+Publish, subscribe
+Webdis exposes Redis PUB/SUB channels to HTTP clients, forwarding messages in the channel as they are published by Redis. This is done using chunked transfer encoding.
+
+Webdis also provides HTML5 WebSocket access to pub/sub channels.
+to the top
+Access control
+Because some Redis commands can write data, exposing Webdis to clients on the web might not be a good idea. Fortunately, an ACL system matches a profile type to a list of permissions. Each access control setting can match clients by IP + range, by HTTP Auth, or by both, and lists the commands they are able and unable to execute.
+This lets you disable write commands for the public, whilst still keeping a full access from your network.
+
+	"acl": [
+		{
+			"disabled":	["SET", "DEBUG", "FLUSHDB", "FLUSHALL"]
+		},
+
+		{
+			"ip":		"192.168.0.0/16",
+			"enabled":	["SET"]
+		},
+
+		{
+			"http_basic_auth":	"root:p4ssw0rd1",
+			"enabled":		["FLUSHDB"]
+		}
+	]
+to the top
+More!
+Also supported:
+HTTP Pipelining
+Connections to Redis using TCP or UNIX sockets
+Restricted user/group
+Logs, contributed by Michael Bernstein
+Cross-Origin Request Sharing (CORS) for XmlHttpRequest2
+Daemonize on start
+
+Publish, subscribe
+Webdis exposes Redis PUB/SUB channels to HTTP clients, forwarding messages in the channel as they are published by Redis. This is done using chunked transfer encoding.
+
+Webdis also provides HTML5 WebSocket access to pub/sub channels.
+to the top
+Access control
+Because some Redis commands can write data, exposing Webdis to clients on the web might not be a good idea. Fortunately, an ACL system matches a profile type to a list of permissions. Each access control setting can match clients by IP + range, by HTTP Auth, or by both, and lists the commands they are able and unable to execute.
+This lets you disable write commands for the public, whilst still keeping a full access from your network.
+
+	"acl": [
+		{
+			"disabled":	["SET", "DEBUG", "FLUSHDB", "FLUSHALL"]
+		},
+
+		{
+			"ip":		"192.168.0.0/16",
+			"enabled":	["SET"]
+		},
+
+		{
+			"http_basic_auth":	"root:p4ssw0rd1",
+			"enabled":		["FLUSHDB"]
+		}
+	]
+to the top
+More!
+Also supported:
+HTTP Pipelining
+Connections to Redis using TCP or UNIX sockets
+Restricted user/group
+Logs, contributed by Michael Bernstein
+Cross-Origin Request Sharing (CORS) for XmlHttpRequest2
+Daemonize on start
+
+Access control
+Because some Redis commands can write data, exposing Webdis to clients on the web might not be a good idea. Fortunately, an ACL system matches a profile type to a list of permissions. Each access control setting can match clients by IP + range, by HTTP Auth, or by both, and lists the commands they are able and unable to execute.
+This lets you disable write commands for the public, whilst still keeping a full access from your network.
+
+	"acl": [
+		{
+			"disabled":	["SET", "DEBUG", "FLUSHDB", "FLUSHALL"]
+		},
+
+		{
+			"ip":		"192.168.0.0/16",
+			"enabled":	["SET"]
+		},
+
+		{
+			"http_basic_auth":	"root:p4ssw0rd1",
+			"enabled":		["FLUSHDB"]
+		}
+	]
+to the top
+More!
+Also supported:
+HTTP Pipelining
+Connections to Redis using TCP or UNIX sockets
+Restricted user/group
+Logs, contributed by Michael Bernstein
+Cross-Origin Request Sharing (CORS) for XmlHttpRequest2
+Daemonize on start
+

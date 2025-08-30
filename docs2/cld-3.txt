@@ -1,0 +1,41 @@
+Envoy Proxy A                    Redis                    Envoy Proxy B
+     │                            │                            │
+     │ WebSocket Upgrade          │                            │
+     │ to Pod X                   │                            │
+     ├─────────────────────────────────────────────────────────┤
+     │                            │                            │
+     │ ATOMIC CHECK & INCREMENT   │                            │ WebSocket Upgrade
+     │ EVALSHA(script,            │                            │ to Pod X
+     │   "ws:pod_conn:pod-x",     │                            │
+     │   max=100,                 │                            │
+     │   conn_id,                 │ ◄──────────────────────────┤
+     │   proxy_id)                │                            │
+     │                            │ ATOMIC CHECK & INCREMENT   │
+     │ ◄─────────────────────────────────────────────────────────
+     │                            │ EVALSHA(script,            │
+     │ Result: {1, 67, "SUCCESS"} │   "ws:pod_conn:pod-x",     │
+     │ ✅ ALLOW CONNECTION        │   max=100,                 │
+     │                            │   conn_id,                 │
+     │                            │   proxy_id)                │
+     │                            │                            │
+     │                            │ ──────────────────────────►│
+     │                            │                            │
+     │                            │ Result: {1, 68, "SUCCESS"} │
+     │                            │ ✅ ALLOW CONNECTION        │
+     
+SCENARIO: Pod limit reached
+     │                            │                            │
+     │ WebSocket Upgrade          │                            │ WebSocket Upgrade  
+     │ to Pod Y (at limit)        │                            │ to Pod Y (at limit)
+     ├─────────────────────────────────────────────────────────┤
+     │                            │                            │
+     │ ATOMIC CHECK               │                            │
+     │ Current count: 100         │ ◄──────────────────────────┤ ATOMIC CHECK
+     │ Max: 100                   │                            │
+     │ ◄─────────────────────────────────────────────────────────
+     │                            │ ──────────────────────────►│
+     │ Result: {0, 100,           │                            │ Result: {0, 100,
+     │         "LIMIT_EXCEEDED"}  │                            │         "LIMIT_EXCEEDED"}
+     │ ❌ DENY CONNECTION         │                            │ ❌ DENY CONNECTION
+
+     

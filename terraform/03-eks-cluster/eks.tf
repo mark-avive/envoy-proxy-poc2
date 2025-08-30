@@ -69,6 +69,9 @@ resource "aws_eks_node_group" "envoy_poc_eks_nodes" {
     aws_iam_role_policy_attachment.envoy_poc_eks_worker_node_policy,
     aws_iam_role_policy_attachment.envoy_poc_eks_cni_policy,
     aws_iam_role_policy_attachment.envoy_poc_eks_container_registry_policy,
+    aws_iam_role_policy_attachment.envoy_poc_eks_ssm_managed_instance_core,
+    aws_iam_role_policy_attachment.envoy_poc_eks_ssm_cloudwatch_agent,
+    aws_iam_role_policy_attachment.envoy_poc_eks_ssm_patch_manager,
   ]
 
   tags = merge(local.common_tags, {

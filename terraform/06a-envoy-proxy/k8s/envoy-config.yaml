@@ -1,0 +1,159 @@
+admin:
+  address:
+    socket_address:
+      protocol: TCP
+      address: 0.0.0.0
+      port_value: 9901
+
+static_resources:
+  listeners:
+  - name: listener_0
+    address:
+      socket_address:
+        protocol: TCP
+        address: 0.0.0.0
+        port_value: 10000
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          codec_type: AUTO
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: local_service
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/redis-cmd"
+                route:
+                  cluster: redis_http_bridge_cluster
+                  timeout: 5s
+              - match:
+                  prefix: "/websocket/metrics"
+                route:
+                  cluster: backend_service
+                  timeout: 300s
+                response_headers_to_add:
+                - header:
+                    key: "x-upstream-host"
+                    value: "%UPSTREAM_HOST%"
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: backend_service
+                  timeout: 300s
+                  upgrade_configs:
+                  - upgrade_type: websocket
+                response_headers_to_add:
+                - header:
+                    key: "x-upstream-host"
+                    value: "%UPSTREAM_HOST%"
+          http_filters:
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                filename: "/etc/envoy/lua/redis-connection-tracker-native.lua"
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          access_log:
+          - name: envoy.access_loggers.stdout
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+              log_format:
+                text_format_source:
+                  inline_string: |
+                    [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+                    %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT%
+                    %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%"
+                    "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
+                    route=%ROUTE_NAME% cluster=%UPSTREAM_CLUSTER%
+
+  - name: redis_listener
+    address:
+      socket_address:
+        protocol: TCP
+        address: 0.0.0.0
+        port_value: 6380
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.redis_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.redis_proxy.v3.RedisProxy
+          stat_prefix: redis_stats
+          settings:
+            op_timeout: 5s
+            enable_redirection: true
+            enable_command_stats: true
+            max_buffer_size_before_flush: 1024
+          prefix_routes:
+            routes:
+            - prefix: "/"
+              cluster: redis_cluster
+
+  clusters:
+  - name: backend_service
+    connect_timeout: 30s
+    type: STRICT_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: backend_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${backend_service_name}
+                port_value: 8080
+    health_checks:
+    - timeout: 5s
+      interval: 10s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+      http_health_check:
+        path: "/health"
+        
+  - name: redis_http_bridge_cluster
+    connect_timeout: 1s
+    type: STRICT_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: redis_http_bridge_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: redis-http-bridge-service
+                port_value: 8080
+        
+  - name: redis_cluster
+    connect_timeout: 1s
+    type: STRICT_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: RING_HASH
+    load_assignment:
+      cluster_name: redis_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${redis_service_name}
+                port_value: 6379
+    health_checks:
+    - timeout: 1s
+      interval: 5s
+      unhealthy_threshold: 2
+      healthy_threshold: 2
+      custom_health_check:
+        name: redis
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.health_checkers.redis.v3.Redis
+          key: health_check_key

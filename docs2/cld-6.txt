@@ -1,0 +1,52 @@
+# ==============================================================================
+#                         METRICS AGGREGATION FLOW
+# ==============================================================================
+
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  Envoy Proxy A  │    │  Envoy Proxy B  │    │  Envoy Proxy C  │
+│                 │    │                 │    │                 │
+│ Connections:    │    │ Connections:    │    │ Connections:    │
+│ - Pod1: 25      │    │ - Pod1: 30      │    │ - Pod1: 20      │
+│ - Pod2: 40      │    │ - Pod2: 35      │    │ - Pod2: 25      │
+│ - Pod3: 15      │    │ - Pod3: 20      │    │ - Pod3: 30      │
+└─────┬───────────┘    └─────┬───────────┘    └─────┬───────────┘
+      │                      │                      │
+      │                      │                      │
+      └──────────────────────┼──────────────────────┘
+                             │
+                             ▼
+                   ┌─────────────────┐
+                   │     Redis       │
+                   │  (Shared State) │
+                   │                 │
+                   │ ws:pod_conn:    │
+                   │ - pod1: 75      │ ◄── Atomic counters
+                   │ - pod2: 100     │     (sum from all proxies)
+                   │ - pod3: 65      │
+                   │                 │
+                   │ Connection IDs: │
+                   │ - proxy_a_123   │
+                   │ - proxy_b_456   │ ◄── Individual connection tracking
+                   │ - proxy_c_789   │
+                   └─────────────────┘
+                             │
+                             ▼
+              ┌─────────────────────────────────┐
+              │       METRICS ENDPOINT          │
+              │    /websocket/metrics           │
+              │                                 │
+              │ websocket_pod_connections{      │
+              │   pod_id="pod1"} 75            │
+              │ websocket_pod_connections{      │
+              │   pod_id="pod2"} 100           │
+              │ websocket_pod_connections{      │
+              │   pod_id="pod3"} 65            │
+              │                                 │
+              │ websocket_proxy_connections{    │
+              │   proxy_id="proxy_a"} 80       │
+              │ websocket_proxy_connections{    │
+              │   proxy_id="proxy_b"} 85       │
+              │ websocket_proxy_connections{    │
+              │   proxy_id="proxy_c"} 75       │
+              └─────────────────────────────────┘
+              

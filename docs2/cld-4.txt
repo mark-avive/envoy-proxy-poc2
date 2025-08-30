@@ -1,0 +1,14 @@
+-- Redis guarantees atomicity for Lua scripts
+-- This prevents race conditions between multiple Envoy instances
+
+-- Example scenario without atomicity (BROKEN):
+-- Proxy A reads: Pod X has 99 connections
+-- Proxy B reads: Pod X has 99 connections  
+-- Proxy A increments: Pod X now has 100 connections ✅
+-- Proxy B increments: Pod X now has 101 connections ❌ (limit exceeded!)
+
+-- With atomic Redis Lua script (CORRECT):
+-- Both proxies execute EVALSHA simultaneously
+-- Redis processes them sequentially:
+-- 1. First proxy: 99 → 100 ✅ "SUCCESS"
+-- 2. Second proxy: sees 100, returns ❌ "LIMIT_EXCEEDED"

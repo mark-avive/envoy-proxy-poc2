@@ -1,0 +1,6 @@
+# ==============================================================================
+#     MULTI-ENVOY COORDINATION FOR WEBSOCKET CONNECTION MANAGEMENT
+# ==============================================================================
+
+CORE CHALLENGE: Multiple Envoy proxies must share real-time state to enforce 
+global limits and provide accurate counts across all proxy instances.

@@ -1,0 +1,129 @@
+-- ==============================================================================
+--                    REAL-TIME METRICS AGGREGATION SYSTEM
+-- ==============================================================================
+
+-- Get comprehensive pod connection metrics
+function get_pod_connection_metrics()
+    local red = get_redis_connection()
+    if not red then
+        return nil, "Redis unavailable"
+    end
+    
+    -- Get all active pods
+    local active_pods = red:smembers("ws:active_pods") or {}
+    local pod_metrics = {}
+    local total_connections = 0
+    
+    -- Use pipeline for efficient batch operations
+    red:init_pipeline()
+    
+    -- Query connection count for each pod
+    for _, pod_id in ipairs(active_pods) do
+        red:get(string.format("ws:pod_conn:%s", pod_id))
+    end
+    
+    -- Query proxy-specific metrics
+    red:scard(string.format("ws:proxy:%s:connections", CONFIG.PROXY_ID))
+    red:scard("ws:all_connections")  -- Total across all proxies
+    
+    local results = red:commit_pipeline()
+    red:close()
+    
+    if not results then
+        return nil, "Pipeline execution failed"
+    end
+    
+    -- Process results
+    for i, pod_id in ipairs(active_pods) do
+        local count = tonumber(results[i]) or 0
+        pod_metrics[pod_id] = {
+            current_connections = count,
+            max_connections = CONFIG.MAX_CONNECTIONS_PER_POD,
+            utilization_percent = math.floor((count / CONFIG.MAX_CONNECTIONS_PER_POD) * 100),
+            available_slots = CONFIG.MAX_CONNECTIONS_PER_POD - count
+        }
+        total_connections = total_connections + count
+    end
+    
+    local proxy_connections = tonumber(results[#active_pods + 1]) or 0
+    local global_connections = tonumber(results[#active_pods + 2]) or 0
+    
+    return {
+        pod_metrics = pod_metrics,
+        proxy_stats = {
+            proxy_id = CONFIG.PROXY_ID,
+            proxy_connections = proxy_connections,
+            proxy_share_percent = global_connections > 0 and 
+                math.floor((proxy_connections / global_connections) * 100) or 0
+        },
+        global_stats = {
+            total_connections = global_connections,
+            active_pods = #active_pods,
+            average_per_pod = #active_pods > 0 and 
+                math.floor(total_connections / #active_pods) or 0
+        }
+    }, nil
+end
+
+-- Enhanced metrics endpoint with detailed pod information
+function handle_detailed_metrics_request(request_handle)
+    local metrics_data, error = get_pod_connection_metrics()
+    
+    if not metrics_data then
+        request_handle:respond(
+            {[":status"] = "503", ["content-type"] = "application/json"},
+            string.format('{"error": "%s", "proxy_id": "%s"}', error or "unknown", CONFIG.PROXY_ID)
+        )
+        return
+    end
+    
+    -- Generate Prometheus metrics
+    local prometheus_metrics = {}
+    
+    -- Global metrics
+    table.insert(prometheus_metrics, string.format(
+        "websocket_connections_total %d", 
+        metrics_data.global_stats.total_connections
+    ))
+    
+    table.insert(prometheus_metrics, string.format(
+        "websocket_active_pods_total %d", 
+        metrics_data.global_stats.active_pods
+    ))
+    
+    -- Per-pod metrics
+    for pod_id, pod_data in pairs(metrics_data.pod_metrics) do
+        table.insert(prometheus_metrics, string.format(
+            'websocket_pod_connections{pod_id="%s"} %d',
+            pod_id, pod_data.current_connections
+        ))
+        
+        table.insert(prometheus_metrics, string.format(
+            'websocket_pod_utilization_percent{pod_id="%s"} %d',
+            pod_id, pod_data.utilization_percent
+        ))
+        
+        table.insert(prometheus_metrics, string.format(
+            'websocket_pod_available_slots{pod_id="%s"} %d',
+            pod_id, pod_data.available_slots
+        ))
+    end
+    
+    -- Proxy-specific metrics
+    table.insert(prometheus_metrics, string.format(
+        'websocket_proxy_connections{proxy_id="%s"} %d',
+        CONFIG.PROXY_ID, metrics_data.proxy_stats.proxy_connections
+    ))
+    
+    table.insert(prometheus_metrics, string.format(
+        'websocket_proxy_share_percent{proxy_id="%s"} %d',
+        CONFIG.PROXY_ID, metrics_data.proxy_stats.proxy_share_percent
+    ))
+    
+    -- Respond with metrics
+    local response_body = table.concat(prometheus_metrics, "\n")
+    request_handle:respond(
+        {[":status"] = "200", ["content-type"] = "text/plain"},
+        response_body
+    )
+end

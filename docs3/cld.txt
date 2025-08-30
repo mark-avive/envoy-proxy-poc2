@@ -1,0 +1,264 @@
+This is a great use case! You want dynamic load balancing with per-pod connection limits and observability for WebSocket connections. Here's how to achieve this with Envoy:
+
+Architecture Overview
+
+[Clients] → [Envoy Instances] → [Dynamic Pod Set]
+              ↓
+         [Control Plane: xDS + Connection Tracking]
+
+Solution Components
+1. Dynamic Service Discovery (xDS)
+Use Envoy's Endpoint Discovery Service (EDS) to dynamically manage your pod endpoints:
+
+# Envoy configuration
+clusters:
+- name: websocket_backend
+  type: EDS
+  eds_cluster_config:
+    eds_config:
+      api_config_source:
+        api_type: GRPC
+        grpc_services:
+        - envoy_grpc:
+            cluster_name: xds_cluster
+  # Circuit breaker for connection limits
+  circuit_breakers:
+    thresholds:
+    - priority: DEFAULT
+      max_connections: 100        # Per-pod connection limit
+      max_pending_requests: 50
+      max_requests: 1000
+      max_retries: 3
+
+2. WebSocket Connection Limiting
+Option A: Circuit Breakers (Built-in)
+
+clusters:
+- name: websocket_backend
+  circuit_breakers:
+    thresholds:
+    - priority: DEFAULT
+      max_connections: 50  # Max WebSocket connections per pod
+      track_remaining: true
+    
+Option B: Local Rate Limiting Filter
+http_filters:
+- name: envoy.filters.http.local_ratelimit
+  typed_config:
+    "@type": type.googleapis.com/udpa.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+    stat_prefix: websocket_connection_limit
+    token_bucket:
+      max_tokens: 100
+      tokens_per_fill: 10
+      fill_interval: 60s
+    filter_enabled:
+      runtime_key: websocket_rate_limit_enabled
+      default_value:
+        numerator: 100
+        denominator: HUNDRED
+
+3. Connection Tracking & Reporting
+Built-in Envoy Stats:
+# Per-cluster connection stats
+cluster.websocket_backend.upstream_cx_active
+cluster.websocket_backend.upstream_cx_total
+cluster.websocket_backend.upstream_cx_connect_fail
+
+# Per-endpoint stats (with EDS)
+cluster.websocket_backend.membership_healthy
+cluster.websocket_backend.membership_total
+
+# Circuit breaker stats
+cluster.websocket_backend.circuit_breakers.default.cx_open
+cluster.websocket_backend.circuit_breakers.default.remaining_cx
+
+Custom Lua Filter for Enhanced Tracking:
+
+function envoy_on_request(request_handle)
+  local headers = request_handle:headers()
+  local upgrade = headers:get("upgrade")
+  
+  if upgrade and string.lower(upgrade) == "websocket" then
+    -- Track WebSocket connection attempt
+    request_handle:respond(
+      {[":status"] = "200"},
+      "WebSocket connection tracked"
+    )
+    
+    -- Increment custom counter
+    local counter = request_handle:counter("websocket.connections.attempted")
+    counter:inc()
+  end
+end
+
+function envoy_on_response(response_handle)
+  local status = response_handle:headers():get(":status")
+  if status == "101" then -- WebSocket upgrade successful
+    local counter = response_handle:counter("websocket.connections.established")
+    counter:inc()
+  end
+end
+
+Complete Example Configuration
+
+admin:
+  access_log_path: /tmp/admin_access.log
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+  - name: websocket_listener
+    address:
+      socket_address: { address: 0.0.0.0, port_value: 8080 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: websocket_proxy
+          upgrade_configs:
+          - upgrade_type: websocket
+          http_filters:
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              inline_code: |
+                function envoy_on_request(request_handle)
+                  local headers = request_handle:headers()
+                  local upgrade = headers:get("upgrade")
+                  
+                  if upgrade and string.lower(upgrade) == "websocket" then
+                    local counter = request_handle:counter("custom.websocket.attempts")
+                    counter:inc()
+                  end
+                end
+          - name: envoy.filters.http.router
+          route_config:
+            name: websocket_routes
+            virtual_hosts:
+            - name: websocket_service
+              domains: ["*"]
+              routes:
+              - match: { prefix: "/" }
+                route:
+                  cluster: websocket_backend
+                  timeout: 0s  # No timeout for WebSockets
+                  upgrade_configs:
+                  - upgrade_type: websocket
+
+  clusters:
+  - name: websocket_backend
+    type: EDS
+    connect_timeout: 5s
+    eds_cluster_config:
+      eds_config:
+        api_config_source:
+          api_type: GRPC
+          grpc_services:
+          - envoy_grpc:
+              cluster_name: xds_cluster
+    # Connection limits per pod
+    circuit_breakers:
+      thresholds:
+      - priority: DEFAULT
+        max_connections: 50
+        max_pending_requests: 10
+        track_remaining: true
+
+  - name: xds_cluster
+    type: STATIC
+    connect_timeout: 1s
+    http2_protocol_options: {}
+    load_assignment:
+      cluster_name: xds_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: your-control-plane.local
+                port_value: 18000
+
+Control Plane Implementation
+You'll need a control plane that implements the EDS API to manage your dynamic pod set:
+
+Option 1: Use Existing Solutions
+Istio Pilot
+Consul Connect
+Envoy Go Control Plane library
+Option 2: Custom Control Plane (Minimal Example)
+
+// Pseudo-code for EDS server
+func (s *EDSServer) StreamEndpoints(stream discovery.EndpointDiscoveryService_StreamEndpointsServer) error {
+    // Watch Kubernetes API for pod changes
+    for {
+        pods := s.k8sClient.GetPods(labelSelector)
+        
+        endpoints := &v3.ClusterLoadAssignment{
+            ClusterName: "websocket_backend",
+            Endpoints: []*endpoint.LocalityLbEndpoints{{
+                LbEndpoints: convertPodsToEndpoints(pods),
+            }},
+        }
+        
+        // Send updated endpoints to Envoy
+        stream.Send(&discovery.DiscoveryResponse{
+            Resources: []types.Resource{endpoints},
+        })
+    }
+}
+
+Monitoring & Observability
+1. Prometheus Metrics Export
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+# Access metrics at: http://envoy:9901/stats/prometheus
+
+2. Key Metrics to Monitor
+
+# Active connections per cluster
+envoy_cluster_upstream_cx_active{cluster_name="websocket_backend"}
+
+# Circuit breaker status
+envoy_cluster_circuit_breakers_cx_open{cluster_name="websocket_backend"}
+envoy_cluster_circuit_breakers_remaining_cx{cluster_name="websocket_backend"}
+
+# Custom WebSocket metrics (from Lua)
+envoy_custom_websocket_attempts_total
+envoy_custom_websocket_established_total
+
+# Per-endpoint health
+envoy_cluster_membership_healthy{cluster_name="websocket_backend"}
+
+3. Grafana Dashboard Query Examples
+
+# Current WebSocket connections per pod
+envoy_cluster_upstream_cx_active{cluster_name="websocket_backend"}
+
+# Connection limit utilization
+(envoy_cluster_circuit_breakers_cx_open / 50) * 100
+
+# WebSocket connection success rate
+rate(envoy_custom_websocket_established_total[5m]) / 
+rate(envoy_custom_websocket_attempts_total[5m])
+
+Summary
+This solution provides:
+
+✅ Dynamic pod management via EDS
+✅ Per-pod connection limits via circuit breakers
+✅ Connection tracking via built-in stats + custom Lua metrics
+✅ WebSocket support with proper upgrade handling
+✅ Observability through Prometheus metrics
+The key is combining EDS for dynamic discovery, circuit breakers for limiting, and comprehensive stats collection for reporting current connection counts per pod.
+
+My solution reports WebSocket connections per backend server pods (the upstream endpoints that Envoy is load balancing to), not per Envoy proxy pod.
+
+The stats like cluster.backend.upstream.10_42_0_11_8080.cx_active show how many active connections each Envoy instance is maintaining to each backend server pod.
+
+If you have multiple Envoy proxy pods, each Envoy will only report its own connections to the backends - you'd need to aggregate across all Envoy instances to get the true total connections per backend server pod.
+

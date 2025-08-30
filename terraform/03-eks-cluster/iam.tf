@@ -63,3 +63,19 @@ resource "aws_iam_role_policy_attachment" "envoy_poc_eks_container_registry_poli
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
   role       = aws_iam_role.envoy_poc_eks_node_group_role.name
 }
+
+# SSM Agent policies for EKS nodes
+resource "aws_iam_role_policy_attachment" "envoy_poc_eks_ssm_managed_instance_core" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  role       = aws_iam_role.envoy_poc_eks_node_group_role.name
+}
+
+resource "aws_iam_role_policy_attachment" "envoy_poc_eks_ssm_cloudwatch_agent" {
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  role       = aws_iam_role.envoy_poc_eks_node_group_role.name
+}
+
+resource "aws_iam_role_policy_attachment" "envoy_poc_eks_ssm_patch_manager" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMPatchAssociation"
+  role       = aws_iam_role.envoy_poc_eks_node_group_role.name
+}

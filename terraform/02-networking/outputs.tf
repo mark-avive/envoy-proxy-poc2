@@ -84,3 +84,24 @@ output "availability_zones" {
   description = "Availability zones used for the subnets"
   value       = local.availability_zones
 }
+
+# VPC Endpoints Outputs
+output "ssm_vpc_endpoint_id" {
+  description = "ID of the SSM VPC endpoint"
+  value       = aws_vpc_endpoint.ssm.id
+}
+
+output "ssm_messages_vpc_endpoint_id" {
+  description = "ID of the SSM Messages VPC endpoint"
+  value       = aws_vpc_endpoint.ssm_messages.id
+}
+
+output "ec2_messages_vpc_endpoint_id" {
+  description = "ID of the EC2 Messages VPC endpoint"
+  value       = aws_vpc_endpoint.ec2_messages.id
+}
+
+output "vpc_endpoints_security_group_id" {
+  description = "ID of the VPC endpoints security group"
+  value       = aws_security_group.vpc_endpoints.id
+}

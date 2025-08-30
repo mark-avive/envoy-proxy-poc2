@@ -28,7 +28,7 @@ spec:
           protocol: TCP
         env:
         - name: ENVOY_ENDPOINT
-          value: "ws://k8s-default-envoypro-06562be0fc-761523953.us-west-2.elb.amazonaws.com:80"
+          value: "ws://abd77a2291c1d4425929acfeb07cd281-12129355f635ff43.elb.us-west-2.amazonaws.com:80"
         - name: CLIENT_ID
           valueFrom:
             fieldRef:

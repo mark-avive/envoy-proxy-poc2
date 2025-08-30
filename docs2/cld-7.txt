@@ -1,0 +1,11 @@
+-- ==============================================================================
+--                    EFFICIENT REAL-TIME QUERIES
+-- ==============================================================================
+
+-- Handle different types of metrics queries
+function handle_metrics_query(request_handle)
+    local headers = request_handle:headers()
+    local query_params = parse_query_string(headers:get(":path"))
+    
+    local query_type = query_params.type or "summary
+    

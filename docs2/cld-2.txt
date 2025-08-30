@@ -1,0 +1,91 @@
+-- ==============================================================================
+--                    ATOMIC CONNECTION LIMIT ENFORCEMENT
+-- ==============================================================================
+
+-- Redis Lua script for atomic connection checking and incrementing
+local REDIS_ATOMIC_SCRIPT = [[
+    local pod_key = KEYS[1]              -- ws:pod_conn:pod-ip
+    local max_connections = tonumber(ARGV[1])
+    local connection_id = ARGV[2]
+    local proxy_id = ARGV[3]
+    local current_time = ARGV[4]
+    
+    -- Get current connection count
+    local current_count = redis.call('GET', pod_key)
+    current_count = tonumber(current_count) or 0
+    
+    -- Check if limit would be exceeded
+    if current_count >= max_connections then
+        return {0, current_count, "LIMIT_EXCEEDED"}
+    end
+    
+    -- Atomically increment and set metadata
+    local new_count = redis.call('INCR', pod_key)
+    
+    -- Track connection details
+    local conn_detail_key = 'ws:conn:' .. connection_id
+    local conn_data = {
+        'pod_id', string.match(pod_key, 'ws:pod_conn:(.+)'),
+        'proxy_id', proxy_id,
+        'created_at', current_time,
+        'last_seen', current_time
+    }
+    redis.call('HMSET', conn_detail_key, unpack(conn_data))
+    redis.call('EXPIRE', conn_detail_key, 7200)  -- 2 hour TTL
+    
+    -- Add to global connection registry
+    redis.call('SADD', 'ws:all_connections', connection_id)
+    
+    return {1, new_count, "SUCCESS"}
+]]
+
+function enforce_pod_connection_limit_atomic(pod_id, connection_id)
+    local red = get_redis_connection()
+    if not red then
+        -- Fallback to deny if Redis unavailable (fail-safe approach)
+        request_handle:logErr("Redis unavailable - denying connection for safety")
+        return false, 0, "REDIS_UNAVAILABLE"
+    end
+    
+    -- Load the atomic script
+    local script_sha = red:script("LOAD", REDIS_ATOMIC_SCRIPT)
+    if not script_sha then
+        red:close()
+        return false, 0, "SCRIPT_LOAD_FAILED"
+    end
+    
+    local pod_key = string.format("ws:pod_conn:%s", pod_id)
+    local result = red:evalsha(
+        script_sha,
+        1,  -- Number of keys
+        pod_key,                        -- KEYS[1]
+        CONFIG.MAX_CONNECTIONS_PER_POD, -- ARGV[1]
+        connection_id,                  -- ARGV[2]
+        CONFIG.PROXY_ID,               -- ARGV[3]
+        tostring(os.time())            -- ARGV[4]
+    )
+    
+    red:close()
+    
+    if not result or #result < 3 then
+        return false, 0, "SCRIPT_EXECUTION_FAILED"
+    end
+    
+    local allowed = result[1] == 1
+    local current_count = tonumber(result[2]) or 0
+    local status = result[3]
+    
+    if allowed then
+        request_handle:logInfo(string.format(
+            "Connection %s allowed to pod %s. Count: %d/%d",
+            connection_id, pod_id, current_count, CONFIG.MAX_CONNECTIONS_PER_POD
+        ))
+    else
+        request_handle:logWarn(string.format(
+            "Connection %s denied to pod %s. Limit exceeded: %d/%d",
+            connection_id, pod_id, current_count, CONFIG.MAX_CONNECTIONS_PER_POD
+        ))
+    end
+    
+    return allowed, current_count, status
+end
